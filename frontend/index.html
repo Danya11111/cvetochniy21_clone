@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Цветочный 21</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
+      <meta name="f21-storefront-build" content="__F21_BUILD__" />
+      <script>window.__F21_BUILD__ = '__F21_BUILD__';</script>
+      <link rel="stylesheet" href="/styles.__F21_BUILD__.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="top-header">
+          <div class="logo">
+              <img src="images/cvet_21_logo_1.jpg" alt="logo">
+          </div>
+          <div class="search-wrapper" id="shop-search-wrapper">
+          <input
+            type="text"
+            id="searchInput"
+            placeholder="Поиск по товарам..."
+          />
+        </div>
+      </header>
+
+      <main id="mainContent">
+        <!-- Магазин -->
+          <section class="tab-content active" id="tab-shop">
+              <div class="categories-bar" id="categoriesBar"></div>
+              <div id="productsList" class="products-list"></div>
+          </section>
+
+
+          <!-- Корзина -->
+          <section class="tab-content" id="tab-cart">
+
+
+              <div id="cartItems">
+
+              </div>
+
+              <div class="cart-summary">
+                  <!-- Блок с бонусами -->
+<!--                  <div class="cart-bonus-section">-->
+<!--                      <div class="cart-bonus-left">-->
+<!--                          <div class="cart-bonus-top-row">-->
+<!--                              <span class="cart-bonus-writeoff-label">Списать</span>-->
+
+<!--                              <div class="bonus-switch-wrapper hidden" id="bonusSwitchWrap">-->
+<!--                                  <label class="bonus-switch">-->
+<!--                                      <input type="checkbox" id="useBonusesToggle">-->
+<!--                                      <span class="switch-slider"></span>-->
+<!--                                  </label>-->
+<!--                              </div>-->
+<!--                          </div>-->
+
+<!--                          <div class="cart-bonus-rows">-->
+<!--                              <div class="cart-bonus-line bonus-balance-row">-->
+<!--                                  <span>У вас бонусов:</span>-->
+<!--                                  <b id="cartBonusValue">0</b>-->
+<!--                              </div>-->
+
+<!--                              <div class="cart-bonus-line bonus-earned-row">-->
+<!--                                  <span>Будет начислено:</span>-->
+<!--                                  <b id="bonusEarnedValue">0</b>-->
+<!--                              </div>-->
+<!--                          </div>-->
+
+<!--                      </div>-->
+<!--                  </div>-->
+
+
+                  <!-- Блок с итогом и кнопкой -->
+                  <div class="cart-total-section">
+                      <div class="cart-total">
+                          Итого: <span id="cartTotal">0 ₽</span>
+                      </div>
+                      <button id="checkoutBtn" class="primary-btn">
+                          Оформить заказ
+                      </button>
+                  </div>
+              </div>
+
+          </section>
+
+
+          <!-- Профиль -->
+        <section class="tab-content" id="tab-profile">
+          <div class="profile-header">
+            <div class="avatar" id="profileAvatar">👤</div>
+            <div class="profile-info">
+              <div id="profileName" class="profile-name"></div>
+              <div id="profileUsername" class="profile-username"></div>
+<!--                <div class="profile-bonuses" id="profileBonuses">Бонусы: 0 (1 бонус = 1 рубль)</div>-->
+            </div>
+          </div>
+
+          <div class="profile-buttons">
+            <button
+              class="profile-tab-btn active"
+              data-profile-tab="addresses"
+            >
+              Адреса
+            </button>
+            <button class="profile-tab-btn" data-profile-tab="orders">
+              Заказы
+            </button>
+            <button class="profile-tab-btn" data-profile-tab="support">
+              Поддержка
+            </button>
+          </div>
+
+          <div id="profileContent" class="profile-content"></div>
+        </section>
+
+        <!-- Информация -->
+        <section class="tab-content" id="tab-info">
+          <div class="info-content">
+              <style>
+                  /* Цветочный №21 — вставка. Все классы с префиксом f21- */
+                  .f21-wrap{
+                      --f21-accent:#5e7256;
+                      --f21-accent-soft: rgba(94,114,86,.16);
+                      --f21-bg:#ffffff;
+                      --f21-card:#ffffff;
+                      --f21-text:#141815;
+                      --f21-muted:#5f6760;
+                      --f21-line: rgba(20,24,21,.10);
+                      --f21-shadow: 0 14px 30px rgba(0,0,0,.08);
+                      --f21-radius: 20px;
+                      --f21-radius-sm: 16px;
+
+                      font-family: "Gilroy", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+                      color: var(--f21-text);
+                  }
+
+                  .f21-sheet{
+                      background: var(--f21-card);
+                      border-radius: 24px;
+                      box-shadow: var(--f21-shadow);
+                      padding: 18px 16px;
+                  }
+
+                  .f21-h1{
+                      margin: 2px 0 10px;
+                      font-size: 28px;
+                      letter-spacing: -0.02em;
+                  }
+                  .f21-h2{
+                      margin: 18px 0 12px;
+                      font-size: 20px;
+                      letter-spacing: -0.01em;
+                  }
+                  .f21-center{ text-align:center; }
+
+                  .f21-p{
+                      margin: 0 0 10px;
+                      color: var(--f21-muted);
+                      font-size: 16px;
+                      line-height: 1.45;
+                  }
+
+                  /* Карточки-строки (сервисный сбор) */
+                  .f21-card-list{
+                      list-style:none;
+                      padding:0;
+                      margin: 0;
+                      display:flex;
+                      flex-direction:column;
+                      gap: 12px;
+                  }
+                  .f21-row-card{
+                      display:flex;
+                      align-items:center;
+                      gap: 12px;
+                      padding: 14px 14px;
+                      border-radius: var(--f21-radius-sm);
+                      background: #fbfcfb;
+                      border: 1px solid var(--f21-line);
+                  }
+                  .f21-icon{
+                      width: 44px;
+                      height: 44px;
+                      border-radius: 14px;
+                      display:grid;
+                      place-items:center;
+                      background: var(--f21-accent-soft);
+                      color: var(--f21-accent);
+                      flex: 0 0 auto;
+                  }
+                  .f21-icon svg{ width: 22px; height: 22px; }
+                  .f21-row-text{ font-size: 16px; color: var(--f21-text); }
+
+                  /* Преимущества 2x2 */
+                  .f21-benefits {
+                      display: grid;
+                      grid-template-columns: repeat(2, 1fr);
+                      gap: 16px 10px;
+                      margin-top: 8px;
+                  }
+
+                  .f21-benefit {
+                      display: flex;
+                      flex-direction: column;
+                      align-items: center;
+                      text-align: center;
+                      gap: 10px;
+                      padding: 6px 4px;
+                  }
+
+                  /* если элемент последний и он НЕ имеет пары */
+                  .f21-benefit:nth-child(odd):last-child {
+                      grid-column: 1 / -1;   /* занимает всю строку */
+                      justify-self: center; /* центр */
+                      max-width: 50%;       /* чтобы не растягивался */
+                  }
+
+                  .f21-circle{
+                      width: 56px;
+                      height: 56px;
+                      border-radius: 999px;
+                      background: var(--f21-accent-soft);
+                      color: var(--f21-accent);
+                      border: 1px solid var(--f21-line);
+                      display:grid;
+                      place-items:center;
+                  }
+                  .f21-circle svg{ width: 26px; height: 26px; }
+                  .f21-benefit-text{
+                      font-size: 15px;
+                      line-height: 1.15;
+                      color: var(--f21-text);
+                  }
+
+                  /* Аккордеон на details/summary */
+                  .f21-accordion{
+                      margin-top: 18px;
+                      border-radius: var(--f21-radius);
+                      border: 1px solid var(--f21-line);
+                      overflow:hidden;
+                      box-shadow: 0 10px 22px rgba(0,0,0,.06);
+                      background: #fff;
+                  }
+                  .f21-accordion details{ border-top: 1px solid var(--f21-line); }
+                  .f21-accordion details:first-child{ border-top:none; }
+
+                  .f21-accordion summary{
+                      list-style:none;
+                      cursor:pointer;
+                      padding: 14px 14px 12px;
+                      font-weight: 800;
+                      font-size: 18px;
+                      display:flex;
+                      align-items:center;
+                      justify-content:space-between;
+                      gap: 12px;
+                      color: var(--f21-text);
+                  }
+                  .f21-accordion summary::-webkit-details-marker{ display:none; }
+
+                  .f21-caret{
+                      width: 30px;
+                      height: 30px;
+                      border-radius: 999px;
+                      border: 1px solid var(--f21-line);
+                      display:grid;
+                      place-items:center;
+                      color: var(--f21-text);
+                      transition: transform .18s ease;
+                      flex: 0 0 auto;
+                  }
+                  .f21-accordion details[open] .f21-caret{ transform: rotate(180deg); }
+
+                  .f21-acc-line{
+                      height: 2px;
+                      background: var(--f21-accent);
+                      opacity: .9;
+                      margin: 0 14px;
+                      border-radius: 2px;
+                  }
+                  .f21-acc-body{
+                      padding: 10px 14px 14px;
+                      color: var(--f21-muted);
+                      font-size: 15.5px;
+                  }
+                  .f21-acc-body ol, .f21-acc-body ul{
+                      margin: 10px 0 0 18px;
+                      padding: 0;
+                  }
+                  .f21-acc-body li{ margin: 8px 0; }
+
+                  /* Контакты */
+                  .f21-kv{
+                      display:flex;
+                      flex-direction:column;
+                      gap: 10px;
+                      color: var(--f21-muted);
+                      font-size: 15.5px;
+                  }
+                  .f21-k{ color: var(--f21-text); font-weight: 700; margin-right: 6px; }
+
+                  .f21-link{
+                      color: inherit;
+                      text-decoration: underline;
+                      cursor: pointer;
+                  }
+              </style>
+
+              <section class="f21-wrap">
+                  <div class="f21-sheet">
+                      <h2 class="f21-h1">О проекте</h2>
+
+                      <p class="f21-p">
+                          «Цветочный №21» — это место, где цветы помогают говорить о чувствах спокойно и искренне.
+                          Мы создавали магазин как пространство доверия и тёплого внимания, где легко выбирать и не нужно спешить.
+                          Для нас важен человек и то ощущение уюта и заботы, с которым он уходит или оформляет заказ.
+                      </p>
+
+                      <p class="f21-p">
+                          Часть цветов мы выращиваем сами, поэтому знаем их путь с самого начала — от первых ростков до готового букета.
+                          Каждый этап наполнен вниманием и аккуратной работой команды. Нас выбирают за удобство, честность и ответственность
+                          за результат, и в будущем мы остаёмся верны этим принципам, сохраняя тепло в каждом прикосновении.
+                      </p>
+
+                      <h3 class="f21-h2">Преимущества</h3>
+
+                      <div class="f21-benefits" role="list">
+                          <div class="f21-benefit" role="listitem">
+                              <div class="f21-circle" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" fill="none">
+                                      <path d="M12 2c4.4 0 8 1.8 8 4s-3.6 4-8 4-8-1.8-8-4 3.6-4 8-4Z" stroke="currentColor" stroke-width="2"/>
+                                      <path d="M4 6v6c0 2.2 3.6 4 8 4s8-1.8 8-4V6" stroke="currentColor" stroke-width="2"/>
+                                      <path d="M4 12v6c0 2.2 3.6 4 8 4s8-1.8 8-4v-6" stroke="currentColor" stroke-width="2"/>
+                                  </svg>
+                              </div>
+                              <div class="f21-benefit-text">Честные<br/>цены</div>
+                          </div>
+
+                          <div class="f21-benefit" role="listitem">
+                              <div class="f21-circle" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" fill="none">
+                                      <path d="M12 2l3.1 6.3 7 .9-5.1 5 1.3 7-6.3-3.4-6.3 3.4 1.3-7-5.1-5 7-.9L12 2Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                                  </svg>
+                              </div>
+                              <div class="f21-benefit-text">Забота<br/>в деталях</div>
+                          </div>
+
+                          <div class="f21-benefit" role="listitem">
+                              <div class="f21-circle" aria-hidden="true">
+                                  <img src="icons/rose1.svg" class="nav-icon" />
+                              </div>
+                              <div class="f21-benefit-text">Свежие и<br/>отборные цветы</div>
+                          </div>
+
+                          <div class="f21-benefit" role="listitem">
+                              <div class="f21-circle" aria-hidden="true">
+                                  <img src="icons/package.svg" class="nav-icon" />
+                              </div>
+                              <div class="f21-benefit-text">Качественная<br/>упаковка</div>
+                          </div>
+
+                          <div class="f21-benefit" role="listitem">
+                              <div class="f21-circle" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" fill="none">
+                                      <path d="M3 7h12v10H3V7Z" stroke="currentColor" stroke-width="2"/>
+                                      <path d="M15 10h4l2 3v4h-6v-7Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                                      <path d="M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="2"/>
+                                      <path d="M17 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="2"/>
+                                  </svg>
+                              </div>
+                              <div class="f21-benefit-text">Быстрая<br/>доставка</div>
+                          </div>
+                      </div>
+
+                      <div class="f21-accordion" aria-label="Информация">
+                          <details open>
+                              <summary>
+                                  <span>Уход за букетом</span>
+                                  <span class="f21-caret" aria-hidden="true">▼</span>
+                              </summary>
+                              <div class="f21-acc-line" aria-hidden="true"></div>
+                              <div class="f21-acc-body">
+                                  <ol>
+                                      <li>Обновите срез стеблей под углом 45°.</li>
+                                      <li>Используйте чистую вазу и свежую воду.</li>
+                                      <li>Меняйте воду каждые 2–3 дня.</li>
+                                      <li>Держите букет вдали от прямых солнечных лучей.</li>
+                                      <li>Удаляйте увядшие цветы для продления жизни букета.</li>
+                                  </ol>
+                              </div>
+                          </details>
+
+
+
+                          <details>
+                              <summary>
+                                  <span>Условия возврата</span>
+                                  <span class="f21-caret" aria-hidden="true">▼</span>
+                              </summary>
+                              <div class="f21-acc-line" aria-hidden="true"></div>
+                              <div class="f21-acc-body">
+                                  <p>
+                                      Компания «Цветочный21.рф» гарантирует свежесть цветов, так как закупка и поставка
+                                      цветов в нашем магазине происходит ежедневно.
+                                  </p>
+
+                                  <h3>Отказ от получения товара</h3>
+                                  <p>
+                                      Покупатель интернет-магазина «Цветочный21» имеет право отказаться от получения товара
+                                      в момент его доставки, если доставленный товар ненадлежащего качества
+                                      (на основании п. 3 ст. 497 ГК РФ, статья 21 Закона «О защите прав потребителей»).
+                                  </p>
+
+                                  <h3>Изменение заказа</h3>
+                                  <p>
+                                      Если Заказчик вносит изменения или дополнения к своему заказу, он должен обратиться
+                                      к нам с соответствующим обращением не позднее чем за 2 часа до доставки товара
+                                      по указанному адресу.
+                                  </p>
+                                  <p>
+                                      В случае несвоевременного обращения (менее чем за 2 часа до доставки товара)
+                                      для внесения изменений или дополнений к заказу, изменения не вносятся и возврат
+                                      денежных средств за оплаченный товар не производится.
+                                  </p>
+
+                                  <h3>Изменения и дополнения менее чем за 3 часа</h3>
+                                  <p>
+                                      Если Заказчик изменяет Заказ (переносит сроки доставки Заказа или состав Заказа)
+                                      менее чем за 3 часа до даты исполнения Заказа, такой Заказ считается новым
+                                      и подлежит 100% предварительной оплате Заказчиком.
+                                  </p>
+
+                                  <h3>Отказ от Заказа</h3>
+                                  <p>
+                                      Если Заказчик отказывается от Заказа менее чем за 6 часов до исполнения заказа,
+                                      Компания возвращает Заказчику сумму оплаты за Заказ за вычетом понесённых затрат
+                                      на приобретение цветов.
+                                  </p>
+
+                                  <h3>Ошибки в данных доставки</h3>
+                                  <p>
+                                      Если Заказчик указывает неполные данные для доставки товара, неверный адрес,
+                                      либо получатель отсутствует по указанному адресу в день доставки,
+                                      Компания обязуется приложить все возможные усилия для осуществления доставки,
+                                      включая дополнительное согласование адреса и времени доставки с получателем.
+                                  </p>
+                                  <p>
+                                      В случае если доставка не может быть осуществлена, либо получатель отказывается
+                                      принять товар по любой причине, заказ считается исполненным и возврат денежных
+                                      средств не производится.
+                                  </p>
+
+                                  <h3>Хранение товара</h3>
+                                  <p>
+                                      Цветы, которые не удалось доставить по причине отсутствия Получателя и невозможности
+                                      их передачи третьим лицам, хранятся на складе в течение 48 часов с даты доставки,
+                                      указанной в заказе.
+                                  </p>
+                                  <p>
+                                      В течение этого времени Получатель или Заказчик могут забрать заказ самостоятельно.
+                                  </p>
+
+                                  <h3>Претензии по качеству</h3>
+                                  <p>
+                                      Если курьер повредил цветы, цветы были подморожены, вас не устроило качество цветов
+                                      или работа флориста, направьте фотографии на электронную почту:
+                                      <strong>cvety-21@yandex.ru</strong>
+                                      с указанием номера заказа и описанием претензии.
+                                  </p>
+                                  <p>
+                                      Компания принимает претензии по качеству товара в течение 24 часов с момента доставки.
+                                      Рассмотрение претензии осуществляется в течение 48 часов с момента получения обращения,
+                                      после чего мы свяжемся с вами.
+                                  </p>
+
+                                  <p>
+                                      В случае если качество цветов в букете или работа флориста не соответствуют информации,
+                                      заявленной на сайте, Компания обязуется:
+                                  </p>
+
+                                  <ul>
+                                      <li>предоставить Заказчику аналогичный товар и за свой счёт осуществить его доставку;</li>
+                                      <li>либо вернуть денежные средства тем же способом, которым была произведена оплата.</li>
+                                  </ul>
+
+                                  <p>
+                                      Срок возврата денежных средств составляет до 7 календарных дней.
+                                  </p>
+
+                                  <h3>Возврат и обмен товаров</h3>
+                                  <p>
+                                      Обращаем ваше внимание, что живые цветы относятся к категории товаров,
+                                      не подлежащих возврату или обмену, в соответствии со статьёй 25 Закона РФ
+                                      «О защите прав потребителей» и Перечнем непродовольственных товаров надлежащего качества,
+                                      не подлежащих возврату или обмену на аналогичный товар иных характеристик
+                                      (в ред. Постановлений Правительства РФ от 20.10.1998 №1222, от 06.02.2002 №81).
+                                  </p>
+                              </div>
+                          </details>
+
+                          <details>
+                              <summary>
+                                  <span>Политика обработки данных</span>
+                                  <span class="f21-caret" aria-hidden="true">▼</span>
+                              </summary>
+                              <div class="f21-acc-line" aria-hidden="true"></div>
+                              <div class="f21-acc-body">
+                                  <ul>
+                                      <li>Безопасное хранение персональных данных.</li>
+                                      <li>Использование данных только для оформления и исполнения заказов.</li>
+                                      <li>Неразглашение данных третьим лицам без законных оснований.</li>
+                                  </ul>
+                              </div>
+                          </details>
+                      </div>
+
+                      <h3 class="f21-h2" style="margin-top:18px;">Контакты</h3>
+                      <div class="f21-kv">
+                          <div><span class="f21-k">Телефон:</span> <span class="f21-v">+7 (927) 668-63-65</span></div>
+                          <div>
+                              <span class="f21-k">Наш сайт:</span>
+                              <a class="f21-v f21-link" href="https://xn--21-dlcmuxg5a7ao9b.xn--p1ai/" target="_blank" rel="noopener">Ссылка</a>
+                          </div>
+
+                          <div>
+                              <span class="f21-k">Telegram:</span>
+                              <a class="f21-v f21-link" href="https://t.me/cvetochniy21" target="_blank" rel="noopener">cvetochniy21</a>
+                          </div>
+                          <div>
+                              <span class="f21-k">Instagram:</span>
+                              <a class="f21-v f21-link" href="https://www.instagram.com/cvetochniy_21?igsh=eGl1MTYzemFpcWVn" target="_blank" rel="noopener">cvetochny_21
+                                  (*Признан экстремистской организацией и запрещен на территории РФ.)</a>
+                          </div>
+                          <div>
+                              <span class="f21-k">ВКонтакте:</span>
+                              <a class="f21-v f21-link" href="https://vk.com/florensia21" target="_blank" rel="noopener">florensia21</a>
+                          </div>
+
+                          <div><span class="f21-k">Почта:</span> <span class="f21-v">cvety-21@yandex.ru</span></div>
+                          <br>
+                          <br>
+                          <div><span class="f21-k">ИП</span> <span class="f21-v">3АЙЛАМОВА АННА ГЕННАДЬЕВНА</span></div>
+                          <div><span class="f21-k">ИНН</span> <span class="f21-v">212408400152</span></div>
+                          <div><span class="f21-k">ОГР</span> <span class="f21-v">314212425200019</span></div>
+                          <div><span class="f21-k">Расчетный счет</span> <span class="f21-v">40802810600000331842</span></div>
+                          <div><span class="f21-k">Банк</span> <span class="f21-v">АО «ТБанк»</span></div>
+                          <div><span class="f21-k">БИК банка</span> <span class="f21-v">044525974</span></div>
+                          <div><span class="f21-k">Корр. счет</span> <span class="f21-v">30101810145250000974</span></div>
+                      </div>
+                  </div>
+              </section>
+
+          </div>
+        </section>
+      </main>
+
+        <div id="cartSumBadge" class="cart-sum-badge hidden">
+            <img src="icons/basket1.svg" alt="Корзина" class="cart-sum-icon">
+            <span class="cart-sum-text"></span>
+        </div>
+
+        <nav class="bottom-nav">
+          <button class="nav-btn" data-tab="shop">
+              <img src="icons/menuwhite.svg" class="nav-icon" />
+              <span>Каталог</span>
+          </button>
+          <button class="nav-btn" data-tab="cart">
+              <img src="icons/bascketwhite.svg" class="nav-icon" />
+              <span>Корзина</span>
+          </button>
+
+          <button class="nav-btn" data-tab="profile">
+              <img src="icons/profilewhite.svg" class="nav-icon" />
+              <span>Профиль</span>
+          </button>
+          <button class="nav-btn nav-btn-cart" data-tab="info">
+              <img src="icons/aboutuswhite.svg" class="nav-icon" />
+              <span>О нас</span>
+          </button>
+      </nav>
+    </div>
+
+    <!-- Модалка оформления заказа -->
+    <div id="checkoutFormWrapper" class="modal hidden">
+        <div class="modal-content">
+            <button id="checkoutCloseIcon" class="modal-close-btn">✕</button>
+            <h2>Оформление заказа</h2>
+
+            <label class="big-weight">
+                Имя
+                <input type="text" id="checkoutFirstName" />
+            </label>
+
+            <label class="big-weight">
+                Фамилия
+                <input type="text" id="checkoutLastName" />
+            </label>
+
+            <label class="big-weight">
+                Телефон (Вводите номер с цифры 9)
+                <input type="tel" id="checkoutPhone" placeholder="+7..." />
+            </label>
+
+            <label class="big-weight">
+                Email
+                <input type="email" id="checkoutEmail" placeholder="example@mail.ru" />
+            </label>
+
+
+            <div class="profile-buttons" id="receiverModeRow" style="margin: 6px 0 10px;">
+                <button type="button" class="profile-tab-btn active" id="receiverModeSelfBtn">Я получу сам</button>
+                <button type="button" class="profile-tab-btn" id="receiverModeOtherBtn">Другой получатель</button>
+            </div>
+
+            <div id="receiverFields" class="hidden">
+                <label class="big-weight">
+                    ФИО получателя
+                    <input type="text" id="receiverFullName"/>
+                </label>
+
+                <label class="big-weight">
+                    Телефон получателя
+                    <input type="tel" id="receiverPhone" placeholder="+7..." />
+                </label>
+            </div>
+
+
+
+
+
+
+            <div id="deliveryFields">
+                <div class="address-block">
+                    <h3>Адрес доставки</h3>
+                    <div id="addressesContainer"></div>
+
+                    <label>
+                        <input
+                                id="newAddressInput"
+                                list="addressSuggestions"
+                                placeholder="Город, улица, дом..."
+                        />
+                        <datalist id="addressSuggestions"></datalist>
+                    </label>
+                </div>
+
+                <label class="big-weight">
+                    Дата доставки
+                    <input type="date" id="deliveryDate" />
+                </label>
+
+                <div>
+                    <div id="deliveryTimeTitle" style="font-size:14px; margin-bottom:6px;" class="big-weight">Время доставки</div>
+                    <div class="categories-bar" id="deliveryTimeSlots"></div>
+
+                    <div id="deliveryHoursNotice" class="delivery-hours-notice hidden">
+                        Доставка цветов осуществляется с 08:00 до 22:00! Вы можете заказывать букеты в любое время через наше приложение.
+                    </div>
+
+                    <input type="hidden" id="deliveryTimeInterval" />
+                </div>
+
+            </div>
+
+            <div id="pickupInfo" class="hidden, text" style="margin-top: 10px; font-size: 14px;">
+                <b>Заказ можно забрать по адресу:</b> Чебоксары, Пирогова 1/2
+
+                <div style="margin-top: 10px;"></div>
+
+                <label class="big-weight" style="display:block;">
+                    Дата самовывоза
+                    <input type="date" id="pickupDate" />
+                </label>
+
+                <div id="pickupTimeWrap" class="hidden" style="margin-top: 8px;">
+                    <label class="big-weight" style="display:block;">
+                        Время самовывоза
+                        <input type="time" id="pickupTime" />
+                    </label>
+                </div>
+            </div>
+
+
+
+            <div class="modal-actions">
+                <button id="checkoutCancel" class="secondary-btn">
+                    Отмена
+                </button>
+                <button id="checkoutConfirm" class="primary-btn">
+                    Перейти к оплате
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Cart Notes (Комментарий / Открытка) -->
+    <div id="cartNoteModal" class="modal hidden">
+        <div class="modal-content">
+            <button id="cartNoteModalClose" class="modal-close-btn">×</button>
+            <h2 id="cartNoteModalTitle">Открытка</h2>
+
+            <label class="big-weight">
+                <textarea id="cartNoteModalTextarea" rows="8" placeholder=""></textarea>
+                <div class="note-counter"><span id="cartNoteModalCounter">0/0</span></div>
+            </label>
+
+            <div class="modal-actions">
+                <button id="cartNoteModalCancel" class="secondary-btn">Отмена</button>
+                <button id="cartNoteModalSave" class="primary-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="/app.__F21_BUILD__.js"></script>
+  </body>
+</html>

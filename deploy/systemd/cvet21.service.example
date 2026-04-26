@@ -1,0 +1,33 @@
+# Канонический unit для production (имя как на сервере: cvet21.service).
+# Установка (пример):
+#   sudo cp deploy/systemd/cvet21.service.example /etc/systemd/system/cvet21.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cvet21.service
+#
+# Переменные окружения: один источник — EnvironmentFile (см. deploy/env.example).
+# Точечные override — только через drop-ins (admin-access, telegram-proxy, broadcast-tuning),
+# без дублирования тех же ключей в основном unit без комментария.
+
+[Unit]
+Description=Cvetochny21 Telegram Mini App (Node)
+After=network-online.target
+Wants=network-online.target
+# Если Bot API идёт через локальный SOCKS после ssh-туннеля:
+# After=network-online.target ssh-tg-socks.service
+# Wants=ssh-tg-socks.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/cvetochny21_tg
+Environment=NODE_ENV=production
+# Секреты и весь production env в одном файле (см. deploy/cvetochny21.env.test-migration.example для NL):
+EnvironmentFile=/etc/cvetochny21.env
+# Не задавайте здесь ADMIN_TELEGRAM_IDS / TELEGRAM_PROXY_URL / BROADCAST_* —
+# используйте drop-in из deploy/systemd/*.conf.example, чтобы не расходиться с /etc/cvetochny21.env.
+ExecStart=/usr/bin/node backend/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

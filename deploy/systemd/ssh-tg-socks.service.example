@@ -1,0 +1,18 @@
+# Copy to /etc/systemd/system/ssh-tg-socks.service and adjust User, ExecStart (remote user@host).
+# Then: sudo systemctl daemon-reload && sudo systemctl enable --now ssh-tg-socks.service
+# Node app should use After=ssh-tg-socks.service (or Requires= for strict ordering).
+
+[Unit]
+Description=SSH dynamic SOCKS5 for Telegram Bot API (127.0.0.1:1080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace with your VPS user/host; keep -D bound to localhost.
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=60 -o ExitOnForwardFailure=yes -D 127.0.0.1:1080 user@your-turkish-vps.example
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

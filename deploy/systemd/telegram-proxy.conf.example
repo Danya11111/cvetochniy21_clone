@@ -1,0 +1,10 @@
+# Drop-in: /etc/systemd/system/cvet21.service.d/telegram-proxy.conf
+# Bot API → api.telegram.org через SOCKS (или direct).
+#
+# Переопределяет поведение TELEGRAM_PROXY_URL из /etc/cvetochny21.env, если нужен отдельный тюнинг без правки основного env.
+# Пустая строка / direct / none = без прокси (см. backend/config.js envTelegramProxyUrl).
+#
+[Service]
+Environment="TELEGRAM_PROXY_URL=socks5h://127.0.0.1:1080"
+# Пример без прокси:
+# Environment="TELEGRAM_PROXY_URL=direct"

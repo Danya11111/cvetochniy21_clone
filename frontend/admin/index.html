@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="theme-color" content="#5e7256" />
+    <meta name="f21-admin-build" content="__F21_BUILD__" />
+    <title>Цветочный 21 — Админка</title>
+    <script>window.__F21_BUILD__ = '__F21_BUILD__';</script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link
+        rel="stylesheet"
+        href="/admin-assets/styles.__F21_BUILD__.css"
+        onerror="console.error('[AdminEmbedApp] stylesheet_load_fail', { asset: 'styles', build: typeof window.__F21_BUILD__ !== 'undefined' ? window.__F21_BUILD__ : 'unset' })"
+    />
+</head>
+<body>
+<script>
+    (function () {
+        var n = typeof window.__F21_EMBEDDED_INIT_DATA === 'string' ? window.__F21_EMBEDDED_INIT_DATA.length : 0;
+        console.log('[AdminEmbedApp] bootstrap_start', {
+            phase: 'body_start_after_head_inject',
+            path: location.pathname,
+            embeddedInitLen: n,
+            topLevel: window.self === window.top
+        });
+    })();
+</script>
+<p id="f21-admin-build-stamp" style="position:fixed;bottom:2px;left:4px;margin:0;font-size:10px;opacity:0.5;z-index:99999;pointer-events:none;">admin build __F21_BUILD__</p>
+<div id="app"></div>
+<script
+    src="/admin-assets/app.__F21_BUILD__.js"
+    onerror="console.error('[AdminEmbedApp] script_load_fail', { asset: 'app', build: typeof window.__F21_BUILD__ !== 'undefined' ? window.__F21_BUILD__ : 'unset' })"
+></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Drop-in: /etc/systemd/system/cvet21.service.d/admin-access.conf
+# Переопределяет или дополняет переменные из /etc/cvetochny21.env.
+#
+# ADMIN_TELEGRAM_IDS — union с дефолтами для доступа к Mini App (см. backend/config.js).
+# TELEGRAM_ADMIN_IDS — отдельный CSV: union с ADMIN_TELEGRAM_IDS в admin-auth; для триггера рассылки из темы
+# смотрится только TELEGRAM_ADMIN_IDS в broadcast-service (пустой список = любой участник форума).
+#
+[Service]
+Environment="ADMIN_PRIMARY_TELEGRAM_ID=YOUR_PRIMARY_TELEGRAM_ID"
+Environment="ADMIN_TELEGRAM_IDS=YOUR_TELEGRAM_ID_1,YOUR_TELEGRAM_ID_2"
+# Явный allowlist триггера рассылки (необязательно):
+# Environment="TELEGRAM_ADMIN_IDS="

@@ -1,0 +1,15 @@
+# Drop-in: /etc/systemd/system/cvet21.service.d/broadcast-tuning.conf
+# Только rate limit / concurrency / retry polling для рассылки.
+# Секреты и thread/chat id здесь не дублируйте — они в /etc/cvetochny21.env.
+#
+[Service]
+Environment="BROADCAST_DELIVERY_INTERVAL_MS=55"
+Environment="BROADCAST_GLOBAL_MESSAGES_PER_SEC=18"
+Environment="BROADCAST_WORKER_CONCURRENCY=4"
+Environment="BROADCAST_PER_CHAT_MIN_INTERVAL_MS=1000"
+Environment="BROADCAST_RETRY_WAVE_POLL_MS=400"
+Environment="BROADCAST_DELIVERY_WAVE_BATCH_SIZE=500"
+Environment="BROADCAST_MAX_COPY_ATTEMPTS=8"
+# Тестовая рассылка в тему (см. docs/broadcast-ops-ru.md):
+# Environment="BROADCAST_TOPIC_TEST_MODE=1"
+# Environment="BROADCAST_TOPIC_TEST_TELEGRAM_IDS=id1,id2"

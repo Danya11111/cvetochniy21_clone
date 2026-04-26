@@ -1,0 +1,118 @@
+/**
+ * Единая модель статусов заказа (платёжный контур приложения vs внешние подписи).
+ *
+ * Источник истины по оплате: orders.total_paid (копейки) + статусы PENDING_PAYMENT / AUTHORIZED / PAID из checkout и T-Bank.
+ * Состояние заказа в МойСклад — только orders.ms_state_name (не перезаписывает платёжный status).
+ */
+
+const PAID_CONFIRMED = new Set(['PAID', 'COMPLETED', 'DELIVERED']);
+const PAYMENT_AWAIT = new Set(['PENDING_PAYMENT']);
+const PAYMENT_AUTHORIZED = new Set(['AUTHORIZED']);
+const CANCELLED_LIKE = new Set(['CANCELLED', 'CANCELED', 'FAILED', 'ERROR']);
+
+function hasRecordedPayment(row) {
+    return Math.round(Number(row && row.total_paid)) > 0;
+}
+
+/** Статус в БД считается «оплачен/завершён» для бизнес-логики (без учёта total_paid). */
+function isPaidStatusString(status) {
+    const u = String(status || '').trim().toUpperCase();
+    return PAID_CONFIRMED.has(u);
+}
+
+/** Оплачен по деньгам или по явному статусу (для админки, KPI, рисков). */
+function isOrderPaidForOps(row) {
+    return hasRecordedPayment(row) || isPaidStatusString(row && row.status);
+}
+
+function deriveOrderAdminPresentation(row) {
+    const raw = String((row && row.status) || '').trim();
+    const u = raw.toUpperCase();
+    const msHint = String((row && row.ms_state_name) || '').trim();
+
+    if (isOrderPaidForOps(row)) {
+        return {
+            status_code: 'paid',
+            status_label: 'Оплачен',
+            status_tone: 'ok',
+            status_raw: raw
+        };
+    }
+    if (PAYMENT_AWAIT.has(u)) {
+        return { status_code: 'awaiting_payment', status_label: 'Ждёт оплаты', status_tone: 'warn', status_raw: raw };
+    }
+    if (PAYMENT_AUTHORIZED.has(u)) {
+        return { status_code: 'authorized', status_label: 'Оплата авторизована', status_tone: 'info', status_raw: raw };
+    }
+    if (CANCELLED_LIKE.has(u) || u.includes('CANCEL')) {
+        return { status_code: 'cancelled', status_label: 'Отменён / ошибка', status_tone: 'alert', status_raw: raw };
+    }
+
+    const display = (msHint || raw || 'В работе').trim();
+    const short = display.length > 42 ? `${display.slice(0, 39)}…` : display;
+    return {
+        status_code: 'fulfillment_external',
+        status_label: short,
+        status_tone: 'info',
+        status_raw: raw
+    };
+}
+
+const PAID_SQL = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+const CANCELLED_SQL = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
+
+/**
+ * Фильтр списка заказов в админке по каноническому status_code (предпочтительно) или legacy status.
+ * @returns {{ clause: string, args: unknown[] }}
+ */
+function buildOrdersListWhereClause({ status_code: statusCode = '', status: legacyStatus = '' } = {}) {
+    const c = String(statusCode || '').trim().toLowerCase();
+    const legacy = String(legacyStatus || '').trim();
+
+    if (c) {
+        if (c === 'paid') return { clause: `WHERE ${PAID_SQL}`, args: [] };
+        if (c === 'awaiting_payment') {
+            return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'PENDING_PAYMENT'`, args: [] };
+        }
+        if (c === 'authorized') {
+            return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'AUTHORIZED'`, args: [] };
+        }
+        if (c === 'cancelled') return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
+        if (c === 'unpaid') {
+            return { clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL})`, args: [] };
+        }
+        if (c === 'fulfillment_external') {
+            return {
+                clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL}) AND UPPER(TRIM(COALESCE(o.status,''))) NOT IN ('PENDING_PAYMENT','AUTHORIZED')`,
+                args: []
+            };
+        }
+    }
+
+    if (!legacy) return { clause: '', args: [] };
+
+    const lu = legacy.toUpperCase();
+    if (['PAID', 'COMPLETED', 'DELIVERED'].includes(lu)) return { clause: `WHERE ${PAID_SQL}`, args: [] };
+    if (lu === 'PENDING_PAYMENT') {
+        return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'PENDING_PAYMENT'`, args: [] };
+    }
+    if (lu === 'AUTHORIZED') {
+        return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'AUTHORIZED'`, args: [] };
+    }
+    if (['CANCELLED', 'CANCELED', 'FAILED', 'ERROR'].includes(lu) || lu.includes('CANCEL')) {
+        return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
+    }
+
+    return { clause: 'WHERE o.status = ?', args: [legacy] };
+}
+
+module.exports = {
+    hasRecordedPayment,
+    isPaidStatusString,
+    isOrderPaidForOps,
+    deriveOrderAdminPresentation,
+    buildOrdersListWhereClause,
+    PAID_CONFIRMED,
+    PAYMENT_AWAIT,
+    PAYMENT_AUTHORIZED
+};

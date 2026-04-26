@@ -1,0 +1,25 @@
+# Legacy example filename. Канонический production unit: deploy/systemd/cvet21.service.example
+# Example: Node.js app after SOCKS tunnel. Copy to /etc/systemd/system/ and edit paths/User.
+# After=ssh-tg-socks.service ensures tunnel is started first (use the same unit name you installed).
+
+[Unit]
+Description=Cvetochny21 Telegram Mini App (Node)
+After=network-online.target ssh-tg-socks.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cvetochny21_tg
+Environment=NODE_ENV=production
+# Рекомендуется выносить переменные в файл (одна строка KEY=value на переменную):
+# EnvironmentFile=-/etc/cvetochny21.env
+#
+# Значения с пробелами в unit-файле — только в кавычках, иначе systemd выдаст
+# "Invalid environment assignment" и проигнорирует строку, например:
+# Environment="BROADCAST_TOPIC_TEST_LABEL=Тестовая рассылка"
+ExecStart=/usr/bin/node backend/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
