@@ -660,9 +660,14 @@ function decodeActionPayload(value) {
 
 function friendlyActionError(message) {
     const text = String(message || '').toUpperCase();
+    /** До общего NOT_FOUND — иначе «PROMOTION_BROADCAST_NOT_FOUND» попадает под подстроку NOT_FOUND */
+    if (text.includes('PROMOTION_BROADCAST_NOT_FOUND'))
+        return 'Рассылка уже удалена или недоступна.';
     if (text.includes('NOT_FOUND')) return 'Не удалось найти нужные данные. Обновите экран и попробуйте снова.';
     if (text.includes('HTTP_401') || text.includes('HTTP_403')) return 'Недостаточно прав для этого действия.';
     if (text.includes('HTTP_5')) return 'Сервис временно недоступен. Повторите через минуту.';
+    if (text.includes('PROMOTION_BROADCAST_DELETE_FAILED'))
+        return 'Не удалось удалить рассылку. Попробуйте ещё раз.';
     if (text.includes('PROMOTION_SOURCE_DELETE_FAILED'))
         return 'Не удалось удалить источник. Попробуйте позже.';
     if (text.includes('ALREADY_PLACED')) return 'Эта карточка уже размещена в теме рассылок.';
@@ -1487,7 +1492,8 @@ async function renderPromoScreen() {
             : showRepeatPlace
               ? `<button type="button" class="promo-bc-place-btn" data-action="promo-bc-place-repeat-prompt" data-bc-id="${esc(id)}">Разместить ещё раз</button>`
               : '';
-        const foot = placeBtnHtml ? `<div class="promo-bc-foot">${placeBtnHtml}</div>` : '';
+        const deleteBtnHtml = `<button type="button" class="promo-bc-del-btn" data-action="promo-bc-delete-prompt" data-bc-id="${esc(id)}">Удалить</button>`;
+        const foot = `<div class="promo-bc-foot"><div class="promo-bc-actions">${placeBtnHtml}${deleteBtnHtml}</div></div>`;
 
         if (!expanded) {
             return `<div class="promo-bc-shell promo-row-wrap">${head}${foot}</div>`;
@@ -3660,6 +3666,48 @@ async function handleAction(action, value, eventTarget) {
                         window.alert(
                             friendlyActionError(String((e && e.message) || '')) ||
                                 'Не удалось разместить рассылку.'
+                        );
+                    }
+                });
+            }
+        );
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-bc-delete-prompt') {
+        const id = String(value || '').trim();
+        if (!id) return;
+        openConfirmationSheet(
+            {
+                title: 'Удалить рассылку?',
+                message:
+                    'Карточка рассылки будет скрыта из списка. Отклики и история размещений останутся в базе.',
+                impact_summary: '',
+                severity: 'destructive',
+                confirm_label: 'Удалить',
+                cancel_label: 'Отмена',
+                irreversible_warning: false
+            },
+            async () => {
+                await runGuardedAction(`promo-bc-delete-${id}`, async () => {
+                    try {
+                        await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}`, {
+                            method: 'DELETE'
+                        });
+                        state.promoBroadcastsList = (state.promoBroadcastsList || []).filter(
+                            (bc) => String(bc.id ?? '') !== id
+                        );
+                        state.promoExpandedBroadcasts = Object.fromEntries(
+                            Object.entries(state.promoExpandedBroadcasts || {}).filter(([k]) => k !== id)
+                        );
+                        state.promoDetailById = Object.fromEntries(
+                            Object.entries(state.promoDetailById || {}).filter(([k]) => k !== id)
+                        );
+                        state.promoFlash = 'Рассылка удалена.';
+                    } catch (e) {
+                        window.alert(
+                            friendlyActionError(String((e && e.message) || '')) ||
+                                'Не удалось удалить рассылку.'
                         );
                     }
                 });

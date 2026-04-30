@@ -551,6 +551,7 @@ async function runAllMigrationsAsync() {
 
         await migratePromotionBroadcastsDropKeywordUnique(db, console);
         await ensurePromotionBroadcastImagesTableExists(db, console);
+        await ensureColumn('promotion_broadcasts', 'deleted_at', 'TEXT');
 
         // products
         await ensureColumn('products', 'category', 'TEXT');

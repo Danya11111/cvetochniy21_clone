@@ -657,6 +657,33 @@ function createAdminRouter({
             }
         );
 
+        router.delete(
+            '/promotion/broadcasts/:id',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                const id = Number(req.params.id || 0);
+                if (!(id > 0)) return res.status(400).json({ ok: false, error: 'BAD_ID' });
+                try {
+                    const out = await promotionService.softDeleteBroadcast(id);
+                    await adminRepository.logAction({
+                        adminId: req.admin.adminId,
+                        action: 'PROMOTION_BROADCAST_SOFT_DELETE',
+                        entityType: 'promotion_broadcast',
+                        entityId: String(id),
+                        details: { already_deleted: !!out.already_deleted }
+                    });
+                    res.json({ ok: true, data: out });
+                } catch (e) {
+                    const c = String(e.code || '');
+                    if (c === 'NOT_FOUND') {
+                        return res.status(404).json({ ok: false, error: 'PROMOTION_BROADCAST_NOT_FOUND' });
+                    }
+                    console.error('[Admin] promotion broadcast soft delete failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_BROADCAST_DELETE_FAILED' });
+                }
+            }
+        );
+
         router.get(
             '/promotion/broadcasts/:id/image/:imageRowId',
             auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
@@ -665,6 +692,8 @@ function createAdminRouter({
                     const bid = Number(req.params.id || 0);
                     const iid = Number(req.params.imageRowId || 0);
                     if (!(bid > 0) || !(iid > 0)) return res.status(404).end();
+                    const bc = await promotionService.getBroadcast(bid);
+                    if (!bc) return res.status(404).end();
                     const img = await promotionService.getBroadcastGalleryImageRow(bid, iid);
                     if (!img) return res.status(404).end();
                     const full = promotionService.resolveImageFullPath(img.storage_path);
@@ -695,14 +724,15 @@ function createAdminRouter({
                 try {
                     const bid = Number(req.params.id || 0);
                     if (!(bid > 0)) return res.status(404).end();
+                    const bc = await promotionService.getBroadcast(bid);
+                    if (!bc) return res.status(404).end();
                     let full = '';
                     if (typeof promotionService.getBroadcastImagePathsForPlacement === 'function') {
                         const paths = await promotionService.getBroadcastImagePathsForPlacement(bid);
                         if (paths[0]) full = paths[0];
                     }
                     if (!full || !fs.existsSync(full)) {
-                        const row = await promotionService.getBroadcast(bid);
-                        const rel = row && row.image_storage_path ? String(row.image_storage_path).trim() : '';
+                        const rel = bc.image_storage_path ? String(bc.image_storage_path).trim() : '';
                         full = rel ? promotionService.resolveImageFullPath(rel) || '' : '';
                     }
                     if (!full || !fs.existsSync(full)) return res.status(404).end();

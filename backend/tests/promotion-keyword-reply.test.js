@@ -53,7 +53,8 @@ async function main() {
             placed_chat_id TEXT,
             placed_thread_id INTEGER,
             placed_campaign_id INTEGER,
-            place_error TEXT
+            place_error TEXT,
+            deleted_at TEXT
         )`
     );
     await run(

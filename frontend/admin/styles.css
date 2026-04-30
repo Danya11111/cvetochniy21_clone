@@ -2556,6 +2556,40 @@ button.dashboard-v2__dash-row {
     border-top: 1px solid rgba(94, 114, 86, 0.08);
 }
 
+.promo-bc-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    align-items: stretch;
+}
+
+.promo-bc-actions .promo-bc-place-btn {
+    flex: 1 1 160px;
+    width: auto;
+    margin-top: 0;
+}
+
+.promo-bc-del-btn {
+    appearance: none;
+    flex: 1 1 120px;
+    min-height: 40px;
+    min-width: 0;
+    padding: 0 var(--space-3);
+    border-radius: 10px;
+    border: 1px solid rgba(185, 80, 80, 0.45);
+    background: transparent;
+    color: #a53c3c;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.promo-bc-del-btn:active {
+    background: rgba(185, 80, 80, 0.08);
+}
+
 .promo-bc-place-btn {
     appearance: none;
     width: 100%;

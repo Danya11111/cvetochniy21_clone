@@ -184,6 +184,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             db,
             `SELECT * FROM promotion_broadcasts
              WHERE status = 'active'
+               AND ${sqlBroadcastNotDeleted()}
                AND LOWER(TRIM(COALESCE(placement_status, ''))) = 'placed'
                AND placed_at IS NOT NULL
                AND TRIM(COALESCE(placed_at, '')) != ''
@@ -386,6 +387,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         return { code: c };
     }
 
+    function sqlBroadcastNotDeleted(alias = '') {
+        const p = alias ? `${alias}.` : '';
+        return `(COALESCE(${p}deleted_at, '') = '')`;
+    }
+
     async function listBroadcasts(limit = 30) {
         const lim = Math.min(100, Math.max(1, Number(limit) || 30));
         return dbAll(
@@ -394,6 +400,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 (SELECT COUNT(*) FROM promotion_broadcast_responses r WHERE r.broadcast_id = b.id) AS response_count,
                 (SELECT COUNT(*) FROM promotion_broadcast_images i WHERE i.broadcast_id = b.id) AS gallery_image_count
              FROM promotion_broadcasts b
+             WHERE ${sqlBroadcastNotDeleted('b')}
              ORDER BY b.created_at DESC
              LIMIT ?`,
             [lim]
@@ -412,7 +419,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     }
 
     async function getBroadcast(id) {
-        const row = await dbGet(db, 'SELECT * FROM promotion_broadcasts WHERE id = ?', [Number(id)]);
+        const row = await dbGet(
+            db,
+            `SELECT * FROM promotion_broadcasts WHERE id = ? AND ${sqlBroadcastNotDeleted()}`,
+            [Number(id)]
+        );
         if (!row) return null;
         const cnt = await dbGet(
             db,
@@ -625,6 +636,32 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         return path.join(__dirname, rel);
     }
 
+    /**
+     * Soft delete: карточка скрывается из админки; отклики и кампании не трогаем.
+     * @returns {Promise<{ id: number, already_deleted: boolean }>}
+     */
+    async function softDeleteBroadcast(id) {
+        const rid = Number(id);
+        if (!(rid > 0)) {
+            const err = new Error('BAD_ID');
+            err.code = 'BAD_ID';
+            throw err;
+        }
+        const existing = await dbGet(db, 'SELECT id, deleted_at FROM promotion_broadcasts WHERE id = ?', [rid]);
+        if (!existing) {
+            const err = new Error('NOT_FOUND');
+            err.code = 'NOT_FOUND';
+            throw err;
+        }
+        const delAt = existing.deleted_at != null ? String(existing.deleted_at).trim() : '';
+        if (delAt !== '') {
+            return { id: rid, already_deleted: true };
+        }
+        const now = new Date().toISOString();
+        await dbRun(db, `UPDATE promotion_broadcasts SET deleted_at = ? WHERE id = ?`, [now, rid]);
+        return { id: rid, already_deleted: false };
+    }
+
     return {
         START_PREFIX,
         getBotUsername: () => getBotUsername(config, runtimeBotProfile),
@@ -643,7 +680,8 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         setPromotionBroadcastPlaced,
         setPromotionBroadcastPlaceFailed,
         getBroadcastImagePathsForPlacement,
-        getBroadcastGalleryImageRow
+        getBroadcastGalleryImageRow,
+        softDeleteBroadcast
     };
 }
 
