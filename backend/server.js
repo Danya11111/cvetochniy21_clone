@@ -133,7 +133,7 @@ const broadcastService = createBroadcastService({
     adminIds: TELEGRAM_ADMIN_IDS || [],
     topicTestModeEnabled: BROADCAST_TOPIC_TEST_MODE,
     topicTestTelegramIds: BROADCAST_TOPIC_TEST_TELEGRAM_IDS || [],
-    topicTestLabel: BROADCAST_TOPIC_TEST_LABEL || 'Тестовая рассылка',
+    topicTestLabel: BROADCAST_TOPIC_TEST_LABEL || '',
     deliveryIntervalMs: BROADCAST_DELIVERY_INTERVAL_MS,
     globalMessagesPerSec: BROADCAST_GLOBAL_MESSAGES_PER_SEC,
     workerConcurrency: BROADCAST_WORKER_CONCURRENCY,

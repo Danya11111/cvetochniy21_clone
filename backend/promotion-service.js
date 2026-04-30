@@ -160,9 +160,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     }
 
     /**
-     * @returns {Promise<boolean>} true если сообщение обработано (ответ отправлен)
+     * Если сообщение совпало с активным кодовым словом — пишет отклик в БД и возвращает true
+     * (чтобы downstream не отправлял текст в поддержку). Сообщения пользователю не отправляет.
+     * @returns {Promise<boolean>}
      */
-    async function handleKeywordReply(telegramClient, message, logger = console) {
+    async function handleKeywordReply(_telegramClient, message, logger = console) {
         const chatType = String(message.chat?.type || '');
         if (chatType !== 'private') return false;
         const text = message.text != null ? String(message.text).trim() : '';
@@ -196,15 +198,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         const fullName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ').trim() || null;
         const now = new Date().toISOString();
 
-        const chatId = message.chat.id;
-
         if (existing) {
-            if (telegramClient?.sendMessage) {
-                await telegramClient.sendMessage({
-                    chatId,
-                    text: 'Ваш отклик уже учтён.'
-                });
-            }
             return true;
         }
 
@@ -218,23 +212,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         } catch (e) {
             const msg = String(e && e.message);
             if (msg.includes('UNIQUE') || msg.toLowerCase().includes('constraint')) {
-                if (telegramClient?.sendMessage) {
-                    await telegramClient.sendMessage({
-                        chatId,
-                        text: 'Ваш отклик уже учтён.'
-                    });
-                }
                 return true;
             }
             throw e;
         }
 
-        if (telegramClient?.sendMessage) {
-            await telegramClient.sendMessage({
-                chatId,
-                text: 'Спасибо, мы зафиксировали ваш отклик.'
-            });
-        }
         logger.log('[Promotion] keyword_response_recorded', { broadcastId: row.id, keyword: row.keyword, tid });
         return true;
     }

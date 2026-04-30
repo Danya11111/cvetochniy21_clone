@@ -432,15 +432,13 @@ function createAdminRouter({
             }
         );
 
-        function buildPromotionTopicCaption(bodyText, keyword) {
-            const kw = String(keyword || '').trim();
-            const footer = `\n\n—\nКодовое слово для откликов в боте: ${kw}`;
-            const max = 1024;
+        /** Только текст рассылки (кодовое слово не показываем в Telegram). */
+        function buildPromotionTopicMessageText(bodyText, { forPhotoCaption } = {}) {
+            const max = forPhotoCaption ? 1024 : 4096;
             const b = String(bodyText || '').trim();
-            if (!b.length) return footer.trim();
-            if (b.length + footer.length <= max) return b + footer;
-            const cap = Math.max(0, max - footer.length - 1);
-            return `${b.slice(0, cap)}…${footer}`;
+            if (!b.length) return '';
+            if (b.length <= max) return b;
+            return `${b.slice(0, Math.max(0, max - 1))}…`;
         }
 
         router.post(
@@ -496,7 +494,8 @@ function createAdminRouter({
                         });
                     }
 
-                    const caption = buildPromotionTopicCaption(row.body_text, row.keyword);
+                    const caption = buildPromotionTopicMessageText(row.body_text, { forPhotoCaption: true });
+                    const textOnly = buildPromotionTopicMessageText(row.body_text, { forPhotoCaption: false });
 
                     let sent = null;
                     if (row.image_storage_path) {
@@ -515,7 +514,7 @@ function createAdminRouter({
                         sent = await telegramClient.sendMessage({
                             chatId: bcChat,
                             messageThreadId: bcThread,
-                            text: caption
+                            text: textOnly
                         });
                     }
 

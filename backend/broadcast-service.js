@@ -419,7 +419,7 @@ function createBroadcastService({
     adminIds = [],
     topicTestModeEnabled = false,
     topicTestTelegramIds = [],
-    topicTestLabel = 'Тестовая рассылка',
+    topicTestLabel = '',
     deliveryIntervalMs = 55,
     globalMessagesPerSec = 18,
     workerConcurrency = 4,
@@ -1220,10 +1220,8 @@ function createBroadcastService({
             String(dt.finishedAtIso || '').trim() !== '';
 
         const recipientsTargeted = Number(mode.recipientsTargeted || 0);
-        const modeHeader = mode.isTopicTestMode
-            ? `🧪 ${String(topicTestLabel || 'Тестовая рассылка')} · topic test mode\n`
-            : '';
-        const modeLine = mode.isTopicTestMode ? `👥 Тестовый охват: ${recipientsTargeted} получателей\n` : '';
+        const topicTestMetaLine = mode.isTopicTestMode ? `Режим: topic test mode\n` : '';
+        const modeLine = mode.isTopicTestMode ? `👥 Охват: ${recipientsTargeted} получателей\n` : '';
         const zeroSuccessWhileTargeted =
             !incomplete &&
             recipientsTargeted > 0 &&
@@ -1247,8 +1245,8 @@ function createBroadcastService({
               } до очистки очереди.\n\n`
             : '';
         const titleLine = incomplete
-            ? `${modeHeader}${incompleteBanner}`
-            : `${modeHeader}📣 Рассылка #${campaignId} завершена\n`;
+            ? `${topicTestMetaLine}${incompleteBanner}`
+            : `📣 Рассылка #${campaignId} завершена\n${topicTestMetaLine}`;
 
         const text =
             `${titleLine}${modeLine}${zeroSuccessBanner}${durationLine}` +
@@ -2848,7 +2846,7 @@ function createBroadcastService({
                 chatId: broadcastTopicChatId,
                 messageThreadId: Number(broadcastTopicThreadId),
                 text:
-                    `🧪 ${String(topicTestLabel || 'Тестовая рассылка')} активна, но список тестовых получателей пуст.\n` +
+                    `Режим topic test mode включён, но список тестовых получателей пуст.\n` +
                     `Рассылка не запущена. Добавьте Telegram ID в BROADCAST_TOPIC_TEST_TELEGRAM_IDS.`
             });
             await run(
