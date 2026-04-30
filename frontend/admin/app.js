@@ -1234,25 +1234,31 @@ async function renderDashboardV2Screen() {
             ${uiErrBanner}
             <section class="dashboard-v2__section" aria-labelledby="dash-heading-main">
                 <h2 id="dash-heading-main" class="dashboard-v2__headline">Основные показатели</h2>
-                <div class="dashboard-v2__date-block">
-                    <div class="dashboard-v2__preset-row" aria-label="Быстрый период">
-                        <button type="button" class="segment-pill segment-pill--compact ${presetToday ? 'segment-pill--active' : ''}" data-action="dashboard-preset-today">Сегодня</button>
-                        <button type="button" class="segment-pill segment-pill--compact ${preset7d ? 'segment-pill--active' : ''}" data-action="dashboard-preset-7d">7 дней</button>
+                <div class="dashboard-v2__period-panel" aria-labelledby="dash-period-heading">
+                    <p id="dash-period-heading" class="dashboard-v2__period-heading">Период</p>
+                    <div class="dashboard-v2__period-segments" role="group" aria-label="Пресет периода">
+                        <button type="button" class="dashboard-v2__period-chip ${presetToday ? 'dashboard-v2__period-chip--active' : ''}" data-action="dashboard-preset-today">Сегодня</button>
+                        <button type="button" class="dashboard-v2__period-chip ${preset7d ? 'dashboard-v2__period-chip--active' : ''}" data-action="dashboard-preset-7d">7 дней</button>
                     </div>
-                    <div class="dashboard-v2__manual-range">
-                        <label class="dashboard-v2__date-field">
-                            <span class="dashboard-v2__date-cap">С</span>
-                            <input class="dashboard-v2__date-input" type="date" id="dash-date-from" name="dash-from" value="${esc(df)}" autocomplete="off" />
-                        </label>
-                        <label class="dashboard-v2__date-field">
-                            <span class="dashboard-v2__date-cap">По</span>
-                            <input class="dashboard-v2__date-input" type="date" id="dash-date-to" name="dash-to" value="${esc(dt)}" autocomplete="off" />
-                        </label>
+                    <div class="dashboard-v2__period-custom">
+                        <div class="dashboard-v2__period-dates-row">
+                            <label class="dashboard-v2__period-date-cell">
+                                <span class="dashboard-v2__period-date-micro">С</span>
+                                <span class="dashboard-v2__period-date-shell">
+                                    <input type="date" id="dash-date-from" name="dash-from" class="dashboard-v2__period-date-native" value="${esc(df)}" autocomplete="off" />
+                                </span>
+                            </label>
+                            <span class="dashboard-v2__period-sep" aria-hidden="true">—</span>
+                            <label class="dashboard-v2__period-date-cell">
+                                <span class="dashboard-v2__period-date-micro">По</span>
+                                <span class="dashboard-v2__period-date-shell">
+                                    <input type="date" id="dash-date-to" name="dash-to" class="dashboard-v2__period-date-native" value="${esc(dt)}" autocomplete="off" />
+                                </span>
+                            </label>
+                        </div>
+                        <button type="button" class="dashboard-v2__period-apply" data-action="dashboard-apply-range">Применить</button>
+                        <p class="dashboard-v2__period-hint">${esc(range.label || '—')}</p>
                     </div>
-                    <div class="dashboard-v2__apply-wrap">
-                        <button type="button" class="dashboard-v2__apply" data-action="dashboard-apply-range">Применить</button>
-                    </div>
-                    <p class="dashboard-v2__range">${esc(range.label || '—')}</p>
                 </div>
 
                 <button type="button" class="dashboard-v2__revenue-card" data-action="dash-tip" data-tip-id="revenue" aria-label="Выручка, справка">

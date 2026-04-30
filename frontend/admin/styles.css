@@ -1363,13 +1363,6 @@ input[type="search"] {
     color: var(--brand-700);
 }
 
-.segment-pill.segment-pill--compact {
-    font-size: 12px;
-    padding: 4px 8px;
-    min-height: 28px;
-    border-radius: 999px;
-}
-
 .segment-pill.segment-pill--active {
     background: var(--brand-500);
     color: var(--text-inverse);
@@ -1393,82 +1386,197 @@ input[type="search"] {
     text-align: center;
 }
 
-.dashboard-v2__date-block {
-    margin-bottom: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-2);
-}
-
-.dashboard-v2__preset-row {
-    display: flex;
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-}
-
-.dashboard-v2__manual-range {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: flex-end;
-    gap: var(--space-3);
+/* Панель выбора периода дашборда: единый «filter card», mobile-first */
+.dashboard-v2__period-panel {
     width: 100%;
+    max-width: 336px;
+    margin: 0 auto var(--space-3);
+    padding: var(--space-3) var(--space-4) calc(var(--space-3) + 2px);
+    box-sizing: border-box;
+    background: rgba(255, 254, 251, 0.92);
+    border: 1px solid rgba(43, 47, 40, 0.1);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 1px 8px rgba(43, 47, 40, 0.05);
 }
 
-.dashboard-v2__date-field {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-}
-
-.dashboard-v2__date-cap {
-    font-size: var(--font-meta);
-    font-weight: 600;
+.dashboard-v2__period-heading {
+    margin: 0 0 8px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     color: var(--text-soft);
+    opacity: 0.88;
+    text-align: center;
 }
 
-.dashboard-v2__date-input {
-    min-height: var(--tap-min);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--line-strong);
-    background: var(--surface-1);
-    color: var(--text-main);
-    font-size: var(--font-body);
-    box-shadow: var(--shadow-card);
-}
-
-.dashboard-v2__apply-wrap {
-    width: 100%;
+.dashboard-v2__period-segments {
     display: flex;
-    justify-content: center;
+    gap: 0;
+    padding: 3px;
+    margin-bottom: 10px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
 }
 
-.dashboard-v2__apply {
-    min-height: var(--tap-min);
-    padding: 0 var(--space-6);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--brand-600);
+.dashboard-v2__period-chip {
+    flex: 1 1 50%;
+    min-height: 34px;
+    margin: 0;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.15;
+    color: var(--text-soft);
+    cursor: pointer;
+    transition:
+        background var(--motion-fast) var(--easing-standard),
+        color var(--motion-fast) var(--easing-standard),
+        box-shadow var(--motion-fast) var(--easing-standard);
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dashboard-v2__period-chip--active {
     background: var(--brand-500);
     color: var(--text-inverse);
-    font-size: var(--font-body);
-    font-weight: 700;
+    box-shadow: 0 1px 4px rgba(94, 114, 86, 0.22);
 }
 
-.dashboard-v2__apply:active {
-    filter: brightness(0.95);
+.dashboard-v2__period-chip:not(.dashboard-v2__period-chip--active):active {
+    background: rgba(255, 255, 255, 0.52);
 }
 
-.dashboard-v2__range {
-    margin: 2px 0 0;
-    font-size: var(--font-body);
-    color: var(--text-soft);
-    text-align: center;
+.dashboard-v2__period-chip--active:active {
+    filter: brightness(0.96);
+}
+
+.dashboard-v2__period-custom {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.dashboard-v2__period-dates-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 8px;
     width: 100%;
+}
+
+.dashboard-v2__period-date-cell {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    min-width: 0;
+    margin: 0;
+}
+
+.dashboard-v2__period-date-micro {
+    padding-left: 2px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-soft);
+    opacity: 0.82;
+}
+
+.dashboard-v2__period-date-shell {
+    display: flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 6px 0 4px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(43, 47, 40, 0.12);
+    background: var(--surface-1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.dashboard-v2__period-date-shell:focus-within {
+    border-color: rgba(94, 114, 86, 0.45);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.75),
+        0 0 0 2px var(--ring);
+}
+
+.dashboard-v2__period-date-native {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    margin: 0;
+    padding: 4px 0;
+    border: none;
+    background: transparent;
+    color: var(--text-main);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    appearance: none;
+    -webkit-appearance: none;
+    color-scheme: light;
+}
+
+.dashboard-v2__period-date-native::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
+}
+
+.dashboard-v2__period-date-native::-webkit-datetime-edit {
+    padding: 0;
+}
+
+.dashboard-v2__period-sep {
+    flex-shrink: 0;
+    align-self: center;
+    padding: 0 0 11px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(92, 95, 86, 0.38);
+}
+
+.dashboard-v2__period-apply {
+    width: 100%;
+    min-height: 36px;
+    margin: 2px 0 0;
+    padding: 0 var(--space-3);
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(94, 114, 86, 0.22);
+    background: rgba(94, 114, 86, 0.08);
+    color: var(--brand-700);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition:
+        background var(--motion-fast) var(--easing-standard),
+        border-color var(--motion-fast) var(--easing-standard);
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dashboard-v2__period-apply:active {
+    background: rgba(94, 114, 86, 0.14);
+    border-color: rgba(94, 114, 86, 0.32);
+}
+
+.dashboard-v2__period-hint {
+    margin: 0;
+    padding: 2px 2px 0;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.35;
+    color: rgba(92, 95, 86, 0.72);
+    text-align: center;
 }
 
 .dashboard-v2__revenue-card {
