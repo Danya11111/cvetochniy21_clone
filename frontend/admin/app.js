@@ -1332,12 +1332,12 @@ async function renderPromoScreen() {
         loadErr = friendlyActionError(e && e.message) || String(e && e.message);
     }
 
-    const notice = state.promoFlash ? `<p class="promo-banner promo-banner--ok">${esc(state.promoFlash)}</p>` : '';
+    const notice = state.promoFlash ? `<div class="promo-banner promo-banner--ok">${esc(state.promoFlash)}</div>` : '';
     state.promoFlash = '';
 
     const botWarn = state.promoBotConfigured
         ? ''
-        : `<p class="promo-banner promo-banner--warn">Для корректных ссылок укажите <span class="mono">TELEGRAM_BOT_USERNAME</span> или дождитесь старта бота (getMe).</p>`;
+        : `<div class="promo-banner promo-banner--warn">Для корректных ссылок задайте <span class="mono">TELEGRAM_BOT_USERNAME</span> или дождитесь запуска бота (getMe).</div>`;
 
     const sources = state.promoSourcesList || [];
 
@@ -1351,8 +1351,8 @@ async function renderPromoScreen() {
         const head = `
             <button type="button" class="promo-row${expanded ? ' promo-row--open' : ''}" data-action="promo-src-toggle" data-code="${esc(code)}">
                 <span class="promo-row__title">${esc(String(r.title || code))}</span>
-                <span class="promo-row__meta">Переходы: ${formatNum(Number(r.clicks_count || 0))} · Оплат: ${formatNum(paidN)} · ${esc(rev)}</span>
-                <span class="promo-row__code mono">${esc(code)}</span>
+                <span class="promo-row__metrics">Переходы: ${formatNum(Number(r.clicks_count || 0))} · Оплат: ${formatNum(paidN)} · ${esc(rev)}</span>
+                <span class="promo-code-chip mono">${esc(code)}</span>
             </button>`;
         if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
         const fullUrl = url || (d && String(d.tracking_url || '').trim()) || '';
@@ -1366,7 +1366,7 @@ async function renderPromoScreen() {
                 ${fullUrl
             ? `
                 <div class="promo-link-block">
-                  <button type="button" class="primary promo-copy-btn" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
+                  <button type="button" class="promo-cta promo-cta--inline" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
                   <p class="promo-muted mono promo-link-fallback">${esc(fullUrl)}</p>
                   <p class="promo-hint-small">Если копирование недоступно — выделите и скопируйте ссылку вручную.</p>
                 </div>`
@@ -1391,11 +1391,19 @@ async function renderPromoScreen() {
               ? '<span class="promo-bc-thumb-placeholder" aria-hidden="true">IMG</span>'
               : '';
         const status = String(b.status || '');
+        const dt = esc(String(b.created_at || '').replace('T', ' ').slice(0, 16));
+        const titleLine =
+            typeof b.title === 'string' && b.title.trim() ? esc(b.title.trim().slice(0, 72)) : '';
         const head = `
             <button type="button" class="promo-row promo-row--bc${expanded ? ' promo-row--open' : ''}" data-action="promo-bc-toggle" data-bc-id="${esc(id)}">
-              ${imgSmall}
-              <span class="promo-row__title">${esc(prev || 'Без текста')}</span>
-              <span class="promo-row__meta">${esc(String(b.created_at || '').replace('T', ' ').slice(0, 16))} · Слово: <strong>${esc(kw)}</strong> · Отклики: ${formatNum(cnt)} · ${esc(status)}</span>
+              ${imgSmall ? `<span class="promo-row-bc__media">${imgSmall}</span>` : ''}
+              <span class="promo-row-bc__text">
+                <span class="promo-row__eyebrow">${dt}${status ? ` · ${esc(status)}` : ''}</span>
+                ${titleLine ? `<span class="promo-row__subtitle">${titleLine}</span>` : ''}
+                <span class="promo-row__title promo-row__title--bc">${esc(prev || 'Без текста')}</span>
+                <span class="promo-row__meta-row"><span class="promo-muted-soft">Кодовое слово</span> <strong class="promo-keyword">${esc(kw)}</strong></span>
+                <span class="promo-row__responses">Отклики: <strong>${formatNum(cnt)}</strong></span>
+              </span>
             </button>`;
         if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
         const fullTxt = esc(String(d?.body_text || d?.text || txt));
@@ -1419,8 +1427,8 @@ async function renderPromoScreen() {
 
     const sourceFormHtml = state.promoFormSourceOpen
         ? `
-      <article class="dashboard-v2__card promo-form-card">
-        <h3 class="dashboard-v2__subhead">Новый источник</h3>
+      <div class="promo-inline-form">
+        <p class="promo-inline-form__label">Новый источник</p>
         <label class="promo-field">
           Название
           <input type="text" id="promoSrcTitle" maxlength="120" placeholder="Instagram май 2026" />
@@ -1430,18 +1438,18 @@ async function renderPromoScreen() {
           <input type="text" id="promoSrcCode" maxlength="64" placeholder="instagram_may_2026" class="mono" />
         </label>
         <p class="promo-hint-small">Если код пустой, он будет сгенерирован из названия.</p>
-        <div class="promo-actions">
-          <button type="button" class="primary" data-action="promo-submit-source">Создать</button>
-          <button type="button" class="secondary" data-action="promo-cancel-source">Отмена</button>
+        <div class="promo-form-actions">
+          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-source">Отмена</button>
+          <button type="button" class="promo-cta promo-cta--grow" data-action="promo-submit-source">Создать источник</button>
         </div>
-      </article>`
+      </div>`
         : '';
 
     const broadcastFormHtml = state.promoFormBroadcastOpen
         ? `
-      <article class="dashboard-v2__card promo-form-card">
-        <h3 class="dashboard-v2__subhead">Новая карточка рассылки</h3>
-        <p class="promo-muted">Отправка по всей базе на этом шаге не подключается — только сохранение и учёт откликов по слову.</p>
+      <div class="promo-inline-form">
+        <p class="promo-inline-form__label">Новая карточка рассылки</p>
+        <p class="promo-muted promo-muted--tight">Массовая отправка базе здесь не подключается — сохраняем текст, картинку и слово; отклики считаются в боте.</p>
         <label class="promo-field">
           Текст
           <textarea id="promoBcText" rows="5" maxlength="4096" required placeholder="Скидка 10% на букеты…"></textarea>
@@ -1462,45 +1470,65 @@ async function renderPromoScreen() {
           Или URL картинки
           <input type="url" id="promoBcImgUrl" maxlength="2000" placeholder="https://…" />
         </label>
-        <div class="promo-actions">
-          <button type="button" class="primary" data-action="promo-submit-broadcast">Сохранить</button>
-          <button type="button" class="secondary" data-action="promo-cancel-broadcast">Отмена</button>
+        <div class="promo-form-actions">
+          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-broadcast">Отмена</button>
+          <button type="button" class="promo-cta promo-cta--grow" data-action="promo-submit-broadcast">Сохранить карточку</button>
         </div>
-      </article>`
+      </div>`
         : '';
 
-    const loadBlock = loadErr ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p>${esc(loadErr)}</p></article>` : '';
+    const loadBlock = loadErr
+        ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn promo-banner-msg">${esc(loadErr)}</div>`
+        : '';
 
     const sourcesEmpty =
         sources.length === 0
-            ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p class="promo-muted">Пока нет источников. Создайте первый, чтобы получить отслеживаемые ссылки.</p></article>`
+            ? `<div class="promo-empty">
+            <div class="promo-empty__icon" aria-hidden="true"></div>
+            <p class="promo-empty__title">Источников пока нет</p>
+            <p class="promo-empty__text">Создайте первый источник — появится отслеживаемая ссылка, переходы, оплаты и выручка по кампании.</p>
+           </div>`
             : '';
 
     const bcEmpty =
         broadcasts.length === 0
-            ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p class="promo-muted">Ещё нет карточек рассылок.</p></article>`
+            ? `<div class="promo-empty">
+            <div class="promo-empty__icon promo-empty__icon--mail" aria-hidden="true"></div>
+            <p class="promo-empty__title">Карточек рассылок пока нет</p>
+            <p class="promo-empty__text">Создайте карточку с текстом, изображением и кодовым словом — отклики пользователей сохранятся автоматически.</p>
+           </div>`
             : '';
 
     return `
-        <div class="dashboard-v2 promo-screen screen-enter">
-            <h2 class="dashboard-v2__headline">Продвижение</h2>
-            ${notice}${botWarn}${loadBlock}
+        <div class="dashboard-v2 promo-screen promo-screen--v2 screen-enter">
+            <div class="promo-alerts">${notice}${botWarn}${loadBlock}</div>
+            <p class="promo-lead">Отслеживаемые ссылки и кампании с откликами по ключевому слову в одном экране.</p>
 
-            <h3 class="dashboard-v2__section-title">Источники</h3>
-            <div class="promo-actions promo-actions--spread">
-              <button type="button" class="primary" data-action="promo-open-source-form">Создать источник</button>
-            </div>
-            ${sourceFormHtml}
-            ${sourcesEmpty}
-            <div class="promo-stack">${sources.map(renderSourceRow).join('')}</div>
+            <section class="promo-section-card" aria-labelledby="promo-sources-heading">
+              <header class="promo-section-card__header">
+                <h2 id="promo-sources-heading" class="promo-section-card__title">Источники</h2>
+                <p class="promo-section-card__desc">Ссылки вида <span class="mono">t.me/… ?start=src_…</span> и атрибуция заказов.</p>
+                <button type="button" class="promo-cta" data-action="promo-open-source-form"><span class="promo-cta__plus" aria-hidden="true">+</span>Создать источник</button>
+              </header>
+              <div class="promo-section-card__body">
+                ${sourceFormHtml}
+                ${sourcesEmpty}
+                ${sources.length ? `<div class="promo-stack promo-stack--in-card">${sources.map(renderSourceRow).join('')}</div>` : ''}
+              </div>
+            </section>
 
-            <h3 class="dashboard-v2__section-title">Рассылки</h3>
-            <div class="promo-actions promo-actions--spread">
-              <button type="button" class="primary" data-action="promo-open-broadcast-form">Создать рассылку</button>
-            </div>
-            ${broadcastFormHtml}
-            ${bcEmpty}
-            <div class="promo-stack">${broadcasts.map(renderBcRow).join('')}</div>
+            <section class="promo-section-card" aria-labelledby="promo-bc-heading">
+              <header class="promo-section-card__header">
+                <h2 id="promo-bc-heading" class="promo-section-card__title">Рассылки</h2>
+                <p class="promo-section-card__desc">Карточка кампании и подсчёт откликов, когда пользователь пишет боту кодовое слово.</p>
+                <button type="button" class="promo-cta" data-action="promo-open-broadcast-form"><span class="promo-cta__plus" aria-hidden="true">+</span>Создать рассылку</button>
+              </header>
+              <div class="promo-section-card__body">
+                ${broadcastFormHtml}
+                ${bcEmpty}
+                ${broadcasts.length ? `<div class="promo-stack promo-stack--in-card">${broadcasts.map(renderBcRow).join('')}</div>` : ''}
+              </div>
+            </section>
         </div>`;
 }
 
