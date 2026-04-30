@@ -18,6 +18,7 @@ function createTelegramUpdateHandler({
     telegramClient,
     telegramAdminDashboard,
     promotionService,
+    runtimeFlagsService = null,
     config,
     runtimeBotProfile = { username: null },
     logger = console
@@ -33,6 +34,22 @@ function createTelegramUpdateHandler({
     } = config;
 
     const effectiveSupportNotifyChatId = TELEGRAM_SUPPORT_NOTIFY_CHAT_ID || TELEGRAM_FORUM_GROUP_ID;
+
+    /** Эффективный флаг: env/config + переопределение из runtime_flags (как в админке). */
+    async function resolveEffectiveSupportRelayEnabled() {
+        if (!runtimeFlagsService || typeof runtimeFlagsService.getAll !== 'function') {
+            return !!SUPPORT_RELAY_ENABLED;
+        }
+        try {
+            const flags = await runtimeFlagsService.getAll();
+            if (flags && typeof flags.SUPPORT_RELAY_ENABLED === 'boolean') {
+                return flags.SUPPORT_RELAY_ENABLED;
+            }
+        } catch (e) {
+            logger.warn('[SupportFlow] runtime_flags_read_failed', { message: e?.message || String(e) });
+        }
+        return !!SUPPORT_RELAY_ENABLED;
+    }
 
     async function handleCallbackQuery(callbackQuery) {
         if (!callbackQuery) return;
@@ -107,10 +124,36 @@ function createTelegramUpdateHandler({
                 callbackQueryId: String(callbackQuery?.id || '')
             });
 
+            logger.log('[SupportFlow] manager_help_request_start', {
+                chatId: String(chatId),
+                fromId: fromId || null
+            });
+
             setImmediate(() => {
-                Promise.resolve(supportService.handleManagerHelpRequest({ callbackQuery, chatId })).catch((e) => {
-                    logger.error('[ManagerHelp] async_error', { message: e?.message || String(e) });
-                });
+                Promise.resolve(supportService.handleManagerHelpRequest({ callbackQuery, chatId }))
+                    .then((r) => {
+                        if (r?.ok === false) {
+                            logger.warn('[SupportFlow] manager_help_request_error', {
+                                fromId: fromId || null,
+                                errorCode: r?.errorCode || 'UNKNOWN'
+                            });
+                        } else if (r?.duplicateSuppressed) {
+                            logger.log('[SupportFlow] manager_help_request_ok', {
+                                fromId: fromId || null,
+                                duplicateSuppressed: true,
+                                reason: r?.reason || null
+                            });
+                        } else {
+                            logger.log('[SupportFlow] manager_help_request_ok', {
+                                fromId: fromId || null,
+                                threadExisted: r?.threadExisted === true
+                            });
+                        }
+                    })
+                    .catch((e) => {
+                        logger.error('[SupportFlow] manager_help_request_error', { message: e?.message || String(e) });
+                        logger.error('[ManagerHelp] async_error', { message: e?.message || String(e) });
+                    });
             });
 
             interactiveLatency.record('callback_query_total_ms', Date.now() - cbStarted);
@@ -339,24 +382,73 @@ function createTelegramUpdateHandler({
         }
 
         if (chatType === 'private') {
+            const fromIdDbg = String(message.from?.id || '') || null;
             const textProbe = message.text != null ? String(message.text).trim() : '';
-            if (
-                promotionService?.handleKeywordReply &&
-                textProbe &&
-                !textProbe.startsWith('/') &&
-                textProbe.length <= MAX_PROMOTION_KEYWORD_LEN
-            ) {
+            logger.log('[SupportFlow] private_message_received', {
+                messageId: Number(message.message_id) || null,
+                fromId: fromIdDbg,
+                hasText: !!(textProbe && textProbe.length),
+                textLen: textProbe.length
+            });
+
+            let promotionKeywordOutcome = 'skipped_probe';
+            if (!promotionService?.handleKeywordReply) {
+                promotionKeywordOutcome = 'no_promo_service';
+            } else if (!textProbe) {
+                promotionKeywordOutcome = 'no_text';
+            } else if (textProbe.startsWith('/')) {
+                promotionKeywordOutcome = 'slash_skipped_elsewhere';
+            } else if (textProbe.length > MAX_PROMOTION_KEYWORD_LEN) {
+                promotionKeywordOutcome = 'too_long_for_keyword_gate';
+            } else {
                 try {
                     const kwHandled = await promotionService.handleKeywordReply(telegramClient, message, logger);
-                    if (kwHandled) return;
+                    if (kwHandled) {
+                        logger.log('[SupportFlow] promotion_keyword_handled', { handled: true });
+                        return;
+                    }
+                    promotionKeywordOutcome = 'checked_not_matched';
                 } catch (e) {
                     logger.warn('[Promotion] keyword_reply_failed', { message: e?.message || String(e) });
+                    promotionKeywordOutcome = 'promo_threw_continue_support';
                 }
             }
-        }
+            logger.log('[SupportFlow] promotion_keyword_handled', {
+                handled: false,
+                reason: promotionKeywordOutcome
+            });
 
-        if (SUPPORT_RELAY_ENABLED && chatType === 'private') {
-            await supportService.handleClientMessage(message);
+            const relayOn = await resolveEffectiveSupportRelayEnabled();
+            if (!relayOn) {
+                logger.warn('[SupportFlow] relay_skipped', {
+                    reason: 'SUPPORT_RELAY_DISABLED_EFFECTIVE',
+                    configEnvRelay: !!SUPPORT_RELAY_ENABLED,
+                    runtimeFlagsAttached: !!(runtimeFlagsService && typeof runtimeFlagsService.getAll === 'function')
+                });
+                return;
+            }
+
+            logger.log('[SupportFlow] handle_client_message_start', {
+                messageId: Number(message.message_id) || null,
+                fromId: fromIdDbg
+            });
+            try {
+                const relayResult = await supportService.handleClientMessage(message);
+                if (!relayResult || relayResult.ok === false) {
+                    logger.warn('[SupportFlow] handle_client_message_error', {
+                        error: relayResult?.error || 'RELAY_REJECTED',
+                        fromId: fromIdDbg
+                    });
+                } else {
+                    logger.log('[SupportFlow] handle_client_message_ok', {
+                        duplicate: !!relayResult.duplicate,
+                        fromId: fromIdDbg
+                    });
+                }
+            } catch (e) {
+                logger.error('[SupportFlow] handle_client_message_error', { message: e?.message || String(e) });
+            }
+            return;
         }
     }
 

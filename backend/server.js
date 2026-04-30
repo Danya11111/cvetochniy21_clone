@@ -165,12 +165,14 @@ const telegramAdminDashboard = createTelegramAdminDashboard({
     telegramClient,
     logger: console
 });
+const runtimeFlagsService = createRuntimeFlagsService({ config });
 const telegramUpdateHandler = createTelegramUpdateHandler({
     supportService,
     broadcastService,
     telegramClient,
     telegramAdminDashboard,
     promotionService,
+    runtimeFlagsService,
     config,
     runtimeBotProfile: telegramRuntimeBotProfile,
     logger: console
@@ -236,7 +238,6 @@ async function markTelegramUpdateProcessed(updateId) {
 }
 const adminAuth = createAdminAuth({ config, logger: console });
 const adminRepository = createAdminRepository();
-const runtimeFlagsService = createRuntimeFlagsService({ config });
 const adminRouter = createAdminRouter({
     auth: adminAuth,
     adminRepository,
