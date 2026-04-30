@@ -485,7 +485,40 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
              VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
             [ttl || null, body, image_url || null, image_storage_path, kw, now, cid]
         );
-        return { id: r.lastID, keyword: kw, created_at: now };
+        return { id: r.lastID, keyword: kw, created_at: now, placement_status: 'draft' };
+    }
+
+    async function setPromotionBroadcastPlaced(rowId, payload) {
+        const rid = Number(rowId);
+        const now = payload.placedAt || new Date().toISOString();
+        await dbRun(
+            db,
+            `UPDATE promotion_broadcasts SET
+                placement_status = 'placed',
+                placed_at = ?,
+                placed_message_id = ?,
+                placed_chat_id = ?,
+                placed_thread_id = ?,
+                placed_campaign_id = ?,
+                place_error = NULL
+             WHERE id = ?`,
+            [
+                now,
+                Number(payload.placedMessageId) > 0 ? Number(payload.placedMessageId) : null,
+                String(payload.placedChatId || '').trim(),
+                Number(payload.placedThreadId || 0) > 0 ? Number(payload.placedThreadId || 0) : null,
+                Number(payload.placedCampaignId || 0) > 0 ? Number(payload.placedCampaignId || 0) : null,
+                rid
+            ]
+        );
+    }
+
+    async function setPromotionBroadcastPlaceFailed(rowId, errMsg) {
+        await dbRun(
+            db,
+            `UPDATE promotion_broadcasts SET placement_status = 'place_failed', place_error = ? WHERE id = ?`,
+            [String(errMsg || 'PLACE_FAILED').slice(0, 500), Number(rowId)]
+        );
     }
 
     function resolveImageFullPath(storagePath) {
@@ -508,7 +541,9 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         listBroadcasts,
         getBroadcast,
         createBroadcast,
-        resolveImageFullPath
+        resolveImageFullPath,
+        setPromotionBroadcastPlaced,
+        setPromotionBroadcastPlaceFailed
     };
 }
 

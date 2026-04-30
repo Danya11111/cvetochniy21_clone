@@ -243,6 +243,7 @@ const adminRouter = createAdminRouter({
     runtimeFlagsService,
     broadcastService,
     promotionService,
+    telegramClient,
     config,
     scanStaleMsOrderLinks
 });

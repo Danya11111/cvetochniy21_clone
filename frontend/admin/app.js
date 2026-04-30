@@ -666,6 +666,14 @@ function friendlyActionError(message) {
     if (text.includes('KEYWORD_DUPLICATE')) return 'Такое кодовое слово уже используется. Выберите другое.';
     if (text.includes('PROMOTION_SOURCE_DELETE_FAILED'))
         return 'Не удалось удалить источник. Попробуйте позже.';
+    if (text.includes('ALREADY_PLACED')) return 'Эта карточка уже размещена в теме рассылок.';
+    if (text.includes('BROADCAST_TOPIC_NOT_CONFIGURED'))
+        return 'Тема рассылок в Telegram не настроена на сервере.';
+    if (text.includes('BROADCASTS_DISABLED')) return 'Массовые рассылки отключены в конфигурации сервера.';
+    if (text.includes('TELEGRAM_SEND_FAILED') || text.includes('CAMPAIGN_START_FAILED'))
+        return 'Не удалось опубликовать в теме или запустить сценарий рассылки. Проверьте настройки бота.';
+    if (text.includes('PROMOTION_BROADCAST_PLACE_FAILED'))
+        return 'Не удалось разместить рассылку. Попробуйте ещё раз или проверьте журнал ошибок.';
     if (text.includes('TELEGRAM_BOT_USERNAME_REQUIRED')) return 'Не задан username бота для ссылок. Укажите TELEGRAM_BOT_USERNAME в настройках сервера.';
     return 'Не удалось выполнить действие. Попробуйте снова.';
 }
@@ -1319,6 +1327,29 @@ async function renderDashboardV2Screen() {
         </div>`;
 }
 
+function formatPromoBroadcastDateTime(iso) {
+    const raw = String(iso || '')
+        .replace('T', ' ')
+        .replace(/\.\d{3}Z?$/, '')
+        .trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})\s(\d{2}:\d{2})/.exec(raw);
+    if (!m) return esc(raw.slice(0, 16));
+    return `${m[3]}.${m[2]}.${m[1]} · ${m[4]}`;
+}
+
+/** @returns {'Черновик'|'Размещена'|'Ошибка размещения'} */
+function promoBroadcastPlacementLabel(placementStatus) {
+    const s = String(placementStatus || 'draft').toLowerCase();
+    if (s === 'placed') return 'Размещена';
+    if (s === 'place_failed') return 'Ошибка размещения';
+    return 'Черновик';
+}
+
+function promoBroadcastCanPlace(placementStatus) {
+    const s = String(placementStatus || 'draft').toLowerCase();
+    return s === 'draft' || s === 'place_failed';
+}
+
 async function renderPromoScreen() {
     let loadErr = '';
     try {
@@ -1405,49 +1436,79 @@ async function renderPromoScreen() {
         const id = String(b.id ?? '');
         const expanded = !!state.promoExpandedBroadcasts[id];
         const d = expanded ? state.promoDetailById[id] : null;
-        const txt = String(b.body_text || b.text || '');
-        const prev = txt.length > 100 ? `${txt.slice(0, 100)}…` : txt;
+        const txt = String(b.text || b.body_text || '');
+        const prevSrc = txt.replace(/\s+/g, ' ').trim();
+        const prev = prevSrc.length > 200 ? `${prevSrc.slice(0, 200)}…` : prevSrc;
         const cnt = Number(b.response_count != null ? b.response_count : 0);
         const kw = String(b.keyword || '');
         const extUrl = String(b.image_url || '').trim();
-        const imgSmall = extUrl
-            ? `<img class="promo-bc-thumb" src="${esc(extUrl)}" alt="" loading="lazy" />`
-            : b.has_uploaded_image
-              ? '<span class="promo-bc-thumb-placeholder" aria-hidden="true">IMG</span>'
-              : '';
-        const status = String(b.status || '');
-        const dt = esc(String(b.created_at || '').replace('T', ' ').slice(0, 16));
-        const titleLine =
-            typeof b.title === 'string' && b.title.trim() ? esc(b.title.trim().slice(0, 72)) : '';
+        const useLocal = !!(b.has_uploaded_image && Number(id) > 0);
+        const localImgPath = useLocal && !extUrl ? `/api/admin/promotion/broadcasts/${encodeURIComponent(id)}/image` : '';
+        let imgSmall = '';
+        if (extUrl) {
+            imgSmall = `<img class="promo-bc-thumb" src="${esc(extUrl)}" alt="" loading="lazy" />`;
+        } else if (localImgPath) {
+            imgSmall = `<img class="promo-bc-thumb promo-bc-await-auth" src="" data-promo-auth-src="${esc(localImgPath)}" alt="" loading="lazy" />`;
+        } else {
+            imgSmall = `<span class="promo-bc-ph" aria-hidden="true"></span>`;
+        }
+        const ps = String(b.placement_status || 'draft').toLowerCase();
+        const placeLabel = promoBroadcastPlacementLabel(ps);
+        const canPlace = promoBroadcastCanPlace(ps);
+        const createdLine = formatPromoBroadcastDateTime(b.created_at || '');
+        const detailHint =
+            ps === 'place_failed' && String(b.place_error || '').trim()
+                ? `<p class="promo-bc-place-err">${esc(String(b.place_error).slice(0, 220))}</p>`
+                : '';
+
         const head = `
-            <button type="button" class="promo-row promo-row--bc${expanded ? ' promo-row--open' : ''}" data-action="promo-bc-toggle" data-bc-id="${esc(id)}">
-              ${imgSmall ? `<span class="promo-row-bc__media">${imgSmall}</span>` : ''}
-              <span class="promo-row-bc__text">
-                <span class="promo-row__eyebrow">${dt}${status ? ` · ${esc(status)}` : ''}</span>
-                ${titleLine ? `<span class="promo-row__subtitle">${titleLine}</span>` : ''}
-                <span class="promo-row__title promo-row__title--bc">${esc(prev || 'Без текста')}</span>
-                <span class="promo-row__meta-row"><span class="promo-muted-soft">Кодовое слово</span> <strong class="promo-keyword">${esc(kw)}</strong></span>
-                <span class="promo-row__responses">Отклики: <strong>${formatNum(cnt)}</strong></span>
+            <button type="button" class="promo-bc-head${expanded ? ' promo-bc-head--open' : ''}"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                data-action="promo-bc-toggle" data-bc-id="${esc(id)}">
+              <span class="promo-bc-head__media">${imgSmall}</span>
+              <span class="promo-bc-head__body">
+                <span class="promo-bc-head__meta">
+                  <span class="promo-bc-head__date">${createdLine}</span>
+                  <span class="promo-bc-pill">${esc(placeLabel)}</span>
+                </span>
+                <span class="promo-bc-head__preview">${esc(prev || 'Без текста')}</span>
+                <span class="promo-bc-head__kw-line">Кодовое слово: <strong>${esc(kw)}</strong></span>
+                <span class="promo-bc-head__responses">Отклики: <strong>${formatNum(cnt)}</strong></span>
+                ${ps === 'placed' && b.placed_at ? `<span class="promo-bc-head__sub">В теме рассылок: ${formatPromoBroadcastDateTime(b.placed_at)}</span>` : ''}
               </span>
             </button>`;
-        if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
-        const fullTxt = esc(String(d?.body_text || d?.text || txt));
-        const bigImgSrc = String((d && (d.local_image_url || d.image_url)) || b.image_url || '').trim();
-        let bigImg = '';
-        if (bigImgSrc) {
-            const needsAuth =
-                bigImgSrc.startsWith('/api/admin/promotion/broadcasts') && bigImgSrc.includes('/image');
-            bigImg = needsAuth
-                ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${esc(bigImgSrc)}" alt="" loading="lazy" />`
-                : `<img class="promo-bc-full" src="${esc(bigImgSrc)}" alt="" loading="lazy" />`;
+        const foot = canPlace
+            ? `<div class="promo-bc-foot">
+                  <button type="button" class="promo-bc-place-btn" data-action="promo-bc-place-prompt" data-bc-id="${esc(id)}">Разместить рассылку</button>
+                </div>`
+            : '';
+
+        if (!expanded) {
+            return `<div class="promo-bc-shell promo-row-wrap">${head}${foot}</div>`;
         }
+        const merged = d || b;
+        const fullTxt = esc(String(merged.text || merged.body_text || txt || ''));
+        const bigExt = String((d && d.image_url) || b.image_url || '').trim();
+        const bigLocal = d && d.local_image_url ? String(d.local_image_url) : localImgPath ? localImgPath : '';
+        const bigSrc = bigExt || bigLocal;
+        let bigImg = '';
+        if (bigSrc) {
+            const needsAuth = bigSrc.includes('/api/admin/promotion/broadcasts') && bigSrc.includes('/image');
+            bigImg = needsAuth
+                ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${esc(bigSrc)}" alt="" loading="lazy" />`
+                : `<img class="promo-bc-full" src="${esc(bigSrc)}" alt="" loading="lazy" />`;
+        }
+        const detailMeta = `<p class="promo-bc-detail-meta">${createdLine} · ${esc(placeLabel)}${ps === 'placed' && b.placed_at ? ` · размещено ${formatPromoBroadcastDateTime(b.placed_at)}` : ''}</p>`;
         const detailBlock = `
-            <div class="promo-row-detail">
+            <div class="promo-row-detail promo-row-detail--bc">
+              ${detailHint}
+              ${detailMeta}
               ${bigImg}
               <p class="promo-bc-body">${fullTxt}</p>
-              <p class="promo-muted">Откликов: ${formatNum(Number(d?.response_count ?? cnt))}</p>
+              <p class="promo-bc-detail-kw">Кодовое слово: <strong>${esc(kw)}</strong></p>
+              <p class="promo-muted promo-bc-detail-resp">Откликов: ${formatNum(Number((d && d.response_count != null ? d.response_count : null) ?? cnt))}</p>
             </div>`;
-        return `<div class="promo-row-wrap">${head}${detailBlock}</div>`;
+        return `<div class="promo-bc-shell promo-row-wrap">${head}${detailBlock}${foot}</div>`;
     }
 
     const sourceFormHtml = state.promoFormSourceOpen
@@ -1474,26 +1535,18 @@ async function renderPromoScreen() {
         ? `
       <div class="promo-inline-form">
         <p class="promo-inline-form__label">Новая карточка рассылки</p>
-        <p class="promo-muted promo-muted--tight">Массовая отправка базе здесь не подключается — сохраняем текст, картинку и слово; отклики считаются в боте.</p>
+        <p class="promo-muted promo-muted--tight">После сохранения нажмите «Разместить рассылку» в списке — карточка уйдёт в тему рассылок Telegram и подключится привычный сценарий доставки. Отклики по кодовому слову в личке с ботом считаются автоматически.</p>
         <label class="promo-field">
-          Текст
+          Изображение (до ~600 KB, необязательно)
+          <input type="file" id="promoBcImg" accept="image/*" />
+        </label>
+        <label class="promo-field">
+          Текст рассылки
           <textarea id="promoBcText" rows="5" maxlength="4096" required placeholder="Скидка 10% на букеты…"></textarea>
         </label>
         <label class="promo-field">
           Кодовое слово
           <input type="text" id="promoBcKw" maxlength="64" placeholder="роза" required />
-        </label>
-        <label class="promo-field">
-          Заголовок (опционально)
-          <input type="text" id="promoBcTitle" maxlength="120" />
-        </label>
-        <label class="promo-field">
-          Изображение (до ~600 KB)
-          <input type="file" id="promoBcImg" accept="image/*" />
-        </label>
-        <label class="promo-field">
-          Или URL картинки
-          <input type="url" id="promoBcImgUrl" maxlength="2000" placeholder="https://…" />
         </label>
         <div class="promo-form-actions">
           <button type="button" class="promo-btn-secondary" data-action="promo-cancel-broadcast">Отмена</button>
@@ -3497,6 +3550,45 @@ async function handleAction(action, value, eventTarget) {
         await renderApp();
         return;
     }
+    if (action === 'promo-bc-place-prompt') {
+        const id = String(value || '').trim();
+        if (!id) return;
+        openConfirmationSheet(
+            {
+                title: 'Разместить рассылку?',
+                message:
+                    'Рассылка будет опубликована в теме рассылок. После размещения её можно будет использовать для отправки по существующему сценарию.',
+                impact_summary: '',
+                severity: 'high',
+                confirm_label: 'Разместить',
+                cancel_label: 'Отмена',
+                irreversible_warning: false
+            },
+            async () => {
+                await runGuardedAction(`promo-bc-place-${id}`, async () => {
+                    try {
+                        await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}/place`, {
+                            method: 'POST'
+                        });
+                        state.promoDetailById = Object.fromEntries(
+                            Object.entries(state.promoDetailById || {}).filter(([k]) => k !== id)
+                        );
+                        state.promoExpandedBroadcasts = Object.fromEntries(
+                            Object.entries(state.promoExpandedBroadcasts || {}).filter(([k]) => k !== id)
+                        );
+                        state.promoFlash = 'Рассылка размещена в теме рассылок.';
+                    } catch (e) {
+                        window.alert(
+                            friendlyActionError(String((e && e.message) || '')) ||
+                                'Не удалось разместить рассылку.'
+                        );
+                    }
+                });
+            }
+        );
+        await renderApp();
+        return;
+    }
     if (action === 'promo-bc-toggle') {
         const id = String(value || '').trim();
         if (!id) return;
@@ -3563,13 +3655,9 @@ async function handleAction(action, value, eventTarget) {
     if (action === 'promo-submit-broadcast') {
         const tEl = document.getElementById('promoBcText');
         const kwEl = document.getElementById('promoBcKw');
-        const titleEl = document.getElementById('promoBcTitle');
-        const urlEl = document.getElementById('promoBcImgUrl');
         const fileEl = document.getElementById('promoBcImg');
         const text = tEl ? String(tEl.value || '').trim() : '';
         const keyword = kwEl ? String(kwEl.value || '').trim().toLowerCase() : '';
-        const titleBc = titleEl ? String(titleEl.value || '').trim() : '';
-        const imageUrlField = urlEl ? String(urlEl.value || '').trim() : '';
         if (!text || !keyword) {
             window.alert('Заполните текст и кодовое слово.');
             return;
@@ -3592,16 +3680,14 @@ async function handleAction(action, value, eventTarget) {
             await api('/api/admin/promotion/broadcasts', {
                 method: 'POST',
                 body: JSON.stringify({
-                    title: titleBc || undefined,
                     text,
                     keyword,
-                    image_url: imageUrlField || undefined,
                     image_base64: imageBase64Payload || undefined
                 })
             });
             state.promoFormBroadcastOpen = false;
             state.promoFlash =
-                'Карточка рассылки создана. Массовая отправка может быть подключена отдельно. Отклики считаются по кодовому слову.';
+                'Карточка сохранена. Откройте список ниже и нажмите «Разместить рассылку», чтобы опубликовать её в теме рассылок.';
         });
         await renderApp();
         return;

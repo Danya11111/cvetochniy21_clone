@@ -10,6 +10,7 @@ function createAdminRouter({
     runtimeFlagsService,
     broadcastService,
     promotionService,
+    telegramClient,
     config,
     scanStaleMsOrderLinks
 }) {
@@ -399,10 +400,10 @@ function createAdminRouter({
                 const bodyText = String(body.body_text || body.text || '').trim();
                 try {
                     const created = await promotionService.createBroadcast({
-                        title: body.title,
+                        title: null,
                         bodyText,
                         keyword: body.keyword,
-                        imageUrl: body.image_url,
+                        imageUrl: undefined,
                         imageBase64: body.image_base64,
                         createdByTgId: req.admin.telegramId
                     });
@@ -427,6 +428,173 @@ function createAdminRouter({
                     }
                     console.error('[Admin] promotion broadcast create failed:', e.message || e);
                     res.status(500).json({ ok: false, error: 'PROMOTION_BROADCAST_CREATE_FAILED' });
+                }
+            }
+        );
+
+        function buildPromotionTopicCaption(bodyText, keyword) {
+            const kw = String(keyword || '').trim();
+            const footer = `\n\n—\nКодовое слово для откликов в боте: ${kw}`;
+            const max = 1024;
+            const b = String(bodyText || '').trim();
+            if (!b.length) return footer.trim();
+            if (b.length + footer.length <= max) return b + footer;
+            const cap = Math.max(0, max - footer.length - 1);
+            return `${b.slice(0, cap)}…${footer}`;
+        }
+
+        router.post(
+            '/promotion/broadcasts/:id/place',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                const id = Number(req.params.id || 0);
+                if (!(id > 0)) return res.status(400).json({ ok: false, error: 'BAD_ID' });
+
+                try {
+                    if (!config.BROADCASTS_ENABLED) {
+                        return res.status(503).json({
+                            ok: false,
+                            error: 'BROADCASTS_DISABLED',
+                            message: 'Рассылки отключены на сервере (BROADCASTS_ENABLED).'
+                        });
+                    }
+
+                    const row = await promotionService.getBroadcast(id);
+                    if (!row) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+
+                    const psRow = String(row.placement_status || 'draft').toLowerCase();
+                    if (psRow === 'placed') {
+                        return res.status(409).json({
+                            ok: false,
+                            error: 'ALREADY_PLACED',
+                            message: 'Рассылка уже размещена в теме.'
+                        });
+                    }
+
+                    const bcChatRaw = config.TELEGRAM_BROADCAST_TOPIC_CHAT_ID || config.TELEGRAM_FORUM_GROUP_ID;
+                    const bcChat = bcChatRaw != null ? String(bcChatRaw).trim() : '';
+                    const bcThread = Number(config.TELEGRAM_BROADCAST_TOPIC_THREAD_ID || 0);
+
+                    if (!telegramClient || typeof telegramClient.sendMessage !== 'function') {
+                        return res.status(503).json({
+                            ok: false,
+                            error: 'TELEGRAM_CLIENT_UNAVAILABLE',
+                            message: 'Клиент Telegram не инициализирован.'
+                        });
+                    }
+
+                    if (!bcChat || !(bcThread > 0)) {
+                        await promotionService.setPromotionBroadcastPlaceFailed(
+                            id,
+                            'BROADCAST_TOPIC_NOT_CONFIGURED — задайте TELEGRAM_BROADCAST_TOPIC_* или TELEGRAM_FORUM_GROUP_ID и thread.'
+                        );
+                        return res.status(503).json({
+                            ok: false,
+                            error: 'BROADCAST_TOPIC_NOT_CONFIGURED',
+                            message:
+                                'Тема рассылок не настроена. Укажите TELEGRAM_BROADCAST_TOPIC_CHAT_ID и TELEGRAM_BROADCAST_TOPIC_THREAD_ID (или алиасы BROADCAST_*_THREAD_ID) в окружении сервера.'
+                        });
+                    }
+
+                    const caption = buildPromotionTopicCaption(row.body_text, row.keyword);
+
+                    let sent = null;
+                    if (row.image_storage_path) {
+                        const fullPath = promotionService.resolveImageFullPath(row.image_storage_path);
+                        if (!fullPath || !fs.existsSync(fullPath)) {
+                            await promotionService.setPromotionBroadcastPlaceFailed(id, 'LOCAL_IMAGE_MISSING');
+                            return res.status(500).json({ ok: false, error: 'LOCAL_IMAGE_MISSING' });
+                        }
+                        sent = await telegramClient.sendPhotoFromFile({
+                            chatId: bcChat,
+                            messageThreadId: bcThread,
+                            filePath: fullPath,
+                            caption
+                        });
+                    } else {
+                        sent = await telegramClient.sendMessage({
+                            chatId: bcChat,
+                            messageThreadId: bcThread,
+                            text: caption
+                        });
+                    }
+
+                    const mid = Number(sent && sent.data && sent.data.message_id ? sent.data.message_id : 0);
+                    if (!sent.ok || !(mid > 0)) {
+                        const reason = `${sent.errorCode || 'TG_SEND'}: ${sent.message || 'SEND_FAILED'}`;
+                        await promotionService.setPromotionBroadcastPlaceFailed(id, reason);
+                        return res.status(502).json({
+                            ok: false,
+                            error: 'TELEGRAM_SEND_FAILED',
+                            message: reason
+                        });
+                    }
+
+                    const flow = await broadcastService.startCampaignFromMiniAppTopicPost(
+                        String(req.admin.telegramId || '').trim(),
+                        {
+                            chatId: bcChat,
+                            threadId: bcThread,
+                            messageId: mid
+                        }
+                    );
+
+                    const campaignIdNum = Number(flow && flow.campaignId ? flow.campaignId : 0);
+
+                    if (!flow || !flow.ok) {
+                        const reason = `${flow.error || 'CAMPAIGN_START_FAILED'}${
+                            flow.transportPreflightReason ? `: ${flow.transportPreflightReason}` : ''
+                        }`;
+                        await promotionService.setPromotionBroadcastPlaceFailed(id, reason);
+                        return res.status(502).json({
+                            ok: false,
+                            error: flow.error || 'CAMPAIGN_START_FAILED',
+                            message: reason
+                        });
+                    }
+
+                    await promotionService.setPromotionBroadcastPlaced(id, {
+                        placedAt: new Date().toISOString(),
+                        placedMessageId: mid,
+                        placedChatId: bcChat,
+                        placedThreadId: bcThread,
+                        placedCampaignId: campaignIdNum
+                    });
+
+                    await adminRepository.logAction({
+                        adminId: req.admin.adminId,
+                        action: 'PROMOTION_BROADCAST_PLACE',
+                        entityType: 'promotion_broadcast',
+                        entityId: String(id),
+                        details: {
+                            campaign_id: campaignIdNum || null,
+                            message_id: mid,
+                            topic_test_mode: !!flow.topicTestMode
+                        }
+                    });
+
+                    return res.json({
+                        ok: true,
+                        data: {
+                            placement_status: 'placed',
+                            placed_message_id: mid,
+                            placed_campaign_id: campaignIdNum,
+                            duplicate_campaign: !!flow.duplicate,
+                            topic_test_mode: !!flow.topicTestMode,
+                            test_mode_skipped: !!flow.testModeSkipped
+                        }
+                    });
+                } catch (e) {
+                    try {
+                        await promotionService.setPromotionBroadcastPlaceFailed(
+                            id,
+                            String(e && e.message ? e.message : e).slice(0, 480)
+                        );
+                    } catch (_) {
+                        /**/
+                    }
+                    console.error('[Admin] promotion broadcast place failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_BROADCAST_PLACE_FAILED' });
                 }
             }
         );

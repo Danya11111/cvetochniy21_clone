@@ -417,9 +417,9 @@ function createTelegramClient({
 
     /**
      * sendPhoto через multipart: файл с диска (если Telegram не может скачать публичный URL).
-     * @param {{ chatId: number|string, filePath: string, caption?: string, replyMarkup?: object, parseMode?: string }} opts
+     * @param {{ chatId: number|string, filePath: string, caption?: string, replyMarkup?: object, parseMode?: string, messageThreadId?: number }} opts
      */
-    async function sendPhotoFromFile({ chatId, filePath, caption, replyMarkup, parseMode }) {
+    async function sendPhotoFromFile({ chatId, filePath, caption, replyMarkup, parseMode, messageThreadId }) {
         if (!hasToken) {
             const r = { ok: false, errorCode: 'NO_TOKEN', message: 'TELEGRAM_BOT_TOKEN is empty' };
             recordOutboundApi('sendPhotoFromFile', r);
@@ -453,6 +453,8 @@ function createTelegramClient({
         const apiUrl = `https://api.telegram.org/bot${botToken}/sendPhoto`;
         const form = new FormData();
         form.append('chat_id', String(chatId));
+        const tid = normalizeMessageThreadId(messageThreadId);
+        if (tid !== undefined) form.append('message_thread_id', String(tid));
         const ct = guessImageContentType(abs);
         const base = path.basename(abs) || 'photo.jpg';
         form.append('photo', fs.createReadStream(abs), {

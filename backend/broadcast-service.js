@@ -2721,8 +2721,15 @@ function createBroadcastService({
         };
     }
 
-    async function startCampaignFromTopicMessage(updateMessage) {
-        const fromUserId = String(updateMessage?.from?.id || '');
+    /**
+     * Общий trigger рассылки из сообщения в теме форума (вебхук админа или размещение из Mini App).
+     * @param {string} initiatedByTelegramId — Telegram ID актора (для прав и аудита)
+     * @param {{ chat: { id: string|number }, message_thread_id?: number|null, message_id: number }} messageStub объект в форме Telegram Message
+     */
+    async function runBroadcastForumTopicCampaignFlow(initiatedByTelegramId, messageStub) {
+        const fromUserId = String(initiatedByTelegramId || '').trim();
+        const updateMessage = messageStub;
+
         if (!isAdmin(fromUserId)) {
             logger.warn('[Broadcast] non-admin attempt rejected', { fromUserId });
             recordLastBroadcastTriggerOutcome({ ok: false, error: 'FORBIDDEN' });
@@ -2929,6 +2936,23 @@ function createBroadcastService({
             jobNotScheduledReason: sch.reason || null,
             deferProductionRecipients: !isTopicTestModeEnabled
         };
+    }
+
+    async function startCampaignFromTopicMessage(updateMessage) {
+        return runBroadcastForumTopicCampaignFlow(String(updateMessage?.from?.id || ''), updateMessage);
+    }
+
+    /**
+     * Тот же сценарий, что сообщение админа в теме рассылок, но источник — пост бота после размещения из Mini App.
+     */
+    async function startCampaignFromMiniAppTopicPost(initiatedByTelegramId, { chatId, threadId, messageId }) {
+        const stubMsg = {
+            chat: { id: chatId },
+            message_thread_id: threadId,
+            message_id: Number(messageId),
+            from: { id: String(initiatedByTelegramId || '').trim() }
+        };
+        return runBroadcastForumTopicCampaignFlow(String(initiatedByTelegramId || '').trim(), stubMsg);
     }
 
     async function deleteCampaignMessages(campaignId, requesterTelegramId) {
@@ -3209,6 +3233,7 @@ function createBroadcastService({
         getBroadcastLastRunDiagnostics,
         getBroadcastLifecycleDiagnostics,
         startCampaignFromTopicMessage,
+        startCampaignFromMiniAppTopicPost,
         deleteCampaignMessages,
         getWorkerSnapshot,
         getBroadcastDeliveryMetrics,

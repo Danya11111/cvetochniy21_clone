@@ -405,6 +405,22 @@ async function runAllMigrationsAsync() {
         await ensureColumn('orders', 'paid_user_msg_sent', 'INTEGER DEFAULT 0');
         await ensureColumn('orders', 'source_code', 'TEXT');
 
+        await ensureColumn('promotion_broadcasts', 'placement_status', "TEXT DEFAULT 'draft'");
+        await ensureColumn('promotion_broadcasts', 'placed_at', 'TEXT');
+        await ensureColumn('promotion_broadcasts', 'placed_message_id', 'INTEGER');
+        await ensureColumn('promotion_broadcasts', 'placed_chat_id', 'TEXT');
+        await ensureColumn('promotion_broadcasts', 'placed_thread_id', 'INTEGER');
+        await ensureColumn('promotion_broadcasts', 'placed_campaign_id', 'INTEGER');
+        await ensureColumn('promotion_broadcasts', 'place_error', 'TEXT');
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE promotion_broadcasts
+                 SET placement_status = 'draft'
+                 WHERE placement_status IS NULL OR TRIM(COALESCE(placement_status, '')) = ''`,
+                (err) => (err ? reject(err) : resolve())
+            );
+        });
+
         // products
         await ensureColumn('products', 'category', 'TEXT');
         await ensureColumn('products', 'category_path', 'TEXT');
