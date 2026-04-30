@@ -256,6 +256,55 @@ db.serialize(() => {
         )
     `);
 
+    /** Mini App «Продвижение»: UTM-подобные источники (deep link src_*) и отклики по кодовому слову. */
+    db.run(`
+        CREATE TABLE IF NOT EXISTS promotion_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            created_at TEXT,
+            created_by_telegram_id TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    `);
+    db.run(`
+        CREATE TABLE IF NOT EXISTS promotion_source_clicks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            source_code TEXT NOT NULL,
+            telegram_id TEXT NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            clicked_at TEXT,
+            raw_payload TEXT
+        )
+    `);
+    db.run(`
+        CREATE TABLE IF NOT EXISTS promotion_broadcasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            body_text TEXT NOT NULL,
+            image_url TEXT,
+            image_storage_path TEXT,
+            keyword TEXT NOT NULL UNIQUE,
+            status TEXT DEFAULT 'active',
+            created_at TEXT,
+            created_by_telegram_id TEXT
+        )
+    `);
+    db.run(`
+        CREATE TABLE IF NOT EXISTS promotion_broadcast_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            broadcast_id INTEGER NOT NULL,
+            keyword TEXT NOT NULL,
+            telegram_id TEXT NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            message_text TEXT,
+            responded_at TEXT
+        )
+    `);
+
     db.run(`
         CREATE TABLE IF NOT EXISTS telegram_processed_updates (
             update_id INTEGER PRIMARY KEY,
@@ -271,6 +320,13 @@ db.serialize(() => {
     db.run('CREATE INDEX IF NOT EXISTS idx_support_messages_thread ON support_messages(thread_id)');
     db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_support_messages_dedupe ON support_messages(thread_id, direction, source_chat_id, source_message_id)');
     db.run('CREATE INDEX IF NOT EXISTS idx_admin_action_logs_created_at ON admin_action_logs(created_at)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_promotion_clicks_source_code ON promotion_source_clicks(source_code)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_promotion_clicks_telegram_id ON promotion_source_clicks(telegram_id)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_responses_broadcast ON promotion_broadcast_responses(broadcast_id)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_responses_tid ON promotion_broadcast_responses(telegram_id)');
+    db.run(
+        'CREATE UNIQUE INDEX IF NOT EXISTS ux_promotion_broadcast_resp_user ON promotion_broadcast_responses(broadcast_id, telegram_id)'
+    );
 
     // После всего DDL: миграции колонок (не запускать до завершения CREATE выше — иначе гонка с async IIFE).
     db.run('SELECT 1', (gateErr) => {
@@ -290,6 +346,8 @@ async function runAllMigrationsAsync() {
         await ensureColumn('users', 'topic_id', 'INTEGER');
         await ensureColumn('users', 'broadcast_suppressed_reason', 'TEXT');
         await ensureColumn('users', 'broadcast_suppressed_at', 'TEXT');
+        await ensureColumn('users', 'first_source_code', 'TEXT');
+        await ensureColumn('users', 'last_source_code', 'TEXT');
 
         await ensureColumn('broadcast_campaigns', 'delivery_send_started_at', 'TEXT');
         await ensureColumn('broadcast_campaigns', 'delivery_send_finished_at', 'TEXT');
@@ -345,6 +403,7 @@ async function runAllMigrationsAsync() {
         await ensureColumn('orders', 'delivery_fee_rub', 'INTEGER DEFAULT 0');
 
         await ensureColumn('orders', 'paid_user_msg_sent', 'INTEGER DEFAULT 0');
+        await ensureColumn('orders', 'source_code', 'TEXT');
 
         // products
         await ensureColumn('products', 'category', 'TEXT');

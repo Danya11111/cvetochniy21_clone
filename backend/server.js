@@ -83,8 +83,7 @@ const { createRuntimeFlagsService } = require('./runtime-flags-service');
 const { createAdminRouter } = require('./admin-routes');
 const { signAdminOpenToken, verifyAdminOpenToken } = require('./admin-open-token');
 const { buildTelegramBotCapabilitiesSnapshot } = require('./telegram-bot-capabilities');
-
-
+const { createPromotionService } = require('./promotion-service');
 
 const crypto = require('crypto');
 
@@ -98,6 +97,12 @@ const telegramClient = createTelegramClient({
     logger: console
 });
 const telegramRuntimeBotProfile = { username: null };
+
+const promotionService = createPromotionService({
+    db,
+    config,
+    runtimeBotProfile: telegramRuntimeBotProfile
+});
 
 const telegramRoutingService = createTelegramRoutingService({
     telegramClient,
@@ -165,6 +170,7 @@ const telegramUpdateHandler = createTelegramUpdateHandler({
     broadcastService,
     telegramClient,
     telegramAdminDashboard,
+    promotionService,
     config,
     runtimeBotProfile: telegramRuntimeBotProfile,
     logger: console
@@ -236,6 +242,7 @@ const adminRouter = createAdminRouter({
     adminRepository,
     runtimeFlagsService,
     broadcastService,
+    promotionService,
     config,
     scanStaleMsOrderLinks
 });
@@ -596,7 +603,7 @@ async function applyBonusesAfterPaid(orderId) {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1536kb' }));
 app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 
 const ADMIN_CLIENT_LOG_STEPS = new Set(['admin_mount_ok']);
@@ -1567,6 +1574,16 @@ app.post('/api/checkout', async (req, res) => {
         const totalPaidK = Math.max(0, totalBeforeK - redeemK);
         const nowIso = new Date().toISOString();
 
+        const promoSrcRow = await new Promise((resolve, reject) => {
+            db.get(
+                'SELECT last_source_code FROM users WHERE telegram_id = ?',
+                [String(telegramId)],
+                (err, row) => (err ? reject(err) : resolve(row))
+            );
+        });
+        const orderSourceCodeRaw = promoSrcRow && promoSrcRow.last_source_code != null ? String(promoSrcRow.last_source_code).trim() : '';
+        const orderSourceCodeForInsert = orderSourceCodeRaw.length ? orderSourceCodeRaw.slice(0, 80) : null;
+
         // 1) Берём последний pending/authorized заказ пользователя (reuse только если age < CHECKOUT_EXISTING_ORDER_REUSE_MAX_MS)
         const rawUnpaidOrderRow = await new Promise((resolve, reject) => {
             db.get(
@@ -1633,9 +1650,11 @@ app.post('/api/checkout', async (req, res) => {
                             florist_comment, card_text,
 
                             -- NEW
-                            email, delivery_option, delivery_fee_rub
+                            email, delivery_option, delivery_fee_rub,
+
+                            source_code
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     `,
                     [
                         telegramId,
@@ -1669,7 +1688,9 @@ app.post('/api/checkout', async (req, res) => {
                         // NEW
                         normEmail,
                         normDeliveryOption,
-                        Math.round(safeDeliveryFeeRub)
+                        Math.round(safeDeliveryFeeRub),
+
+                        orderSourceCodeForInsert
                     ],
                     function (err) {
                         if (err) return reject(err);
@@ -1722,7 +1743,9 @@ app.post('/api/checkout', async (req, res) => {
                         -- NEW
                         email = ?,
                         delivery_option = ?,
-                        delivery_fee_rub = ?
+                        delivery_fee_rub = ?,
+
+                        source_code = COALESCE(source_code, ?)
                     WHERE id = ?
                     `,
                     [
@@ -1751,6 +1774,8 @@ app.post('/api/checkout', async (req, res) => {
                         normEmail,
                         normDeliveryOption,
                         Math.round(safeDeliveryFeeRub),
+
+                        orderSourceCodeForInsert,
 
                         orderRow.id
                     ],

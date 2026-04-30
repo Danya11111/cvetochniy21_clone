@@ -27,7 +27,7 @@ const BOTTOM_NAV = [
 
 const SCREEN_META = {
     dashboard: { title: 'Админка', subtitle: '', nav: 'dashboard' },
-    promo: { title: 'Продвижение', subtitle: 'Раздел в разработке', nav: 'promo' },
+    promo: { title: 'Продвижение', subtitle: 'Источники и кампании', nav: 'promo' },
     home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
     actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
     orders: { title: 'Заказы', subtitle: 'Статусы и фильтры', nav: 'orders' },
@@ -158,7 +158,17 @@ const state = {
     orderDetails: {},
     clientDetails: {},
     supportDetails: {},
-    broadcastDetails: {}
+    broadcastDetails: {},
+    promoSourcesList: [],
+    promoBroadcastsList: [],
+    promoBotConfigured: false,
+    promoExpandedSources: {},
+    promoDetailByCode: {},
+    promoExpandedBroadcasts: {},
+    promoDetailById: {},
+    promoFormSourceOpen: false,
+    promoFormBroadcastOpen: false,
+    promoFlash: ''
 };
 
 function loadUiState() {
@@ -653,7 +663,8 @@ function friendlyActionError(message) {
     if (text.includes('NOT_FOUND')) return 'Не удалось найти нужные данные. Обновите экран и попробуйте снова.';
     if (text.includes('HTTP_401') || text.includes('HTTP_403')) return 'Недостаточно прав для этого действия.';
     if (text.includes('HTTP_5')) return 'Сервис временно недоступен. Повторите через минуту.';
-    if (text.includes('NETWORK') || text.includes('FAILED TO FETCH')) return 'Проверьте интернет-соединение и повторите действие.';
+    if (text.includes('KEYWORD_DUPLICATE')) return 'Такое кодовое слово уже используется. Выберите другое.';
+    if (text.includes('TELEGRAM_BOT_USERNAME_REQUIRED')) return 'Не задан username бота для ссылок. Укажите TELEGRAM_BOT_USERNAME в настройках сервера.';
     return 'Не удалось выполнить действие. Попробуйте снова.';
 }
 
@@ -1306,13 +1317,190 @@ async function renderDashboardV2Screen() {
         </div>`;
 }
 
-function renderPromoPlaceholderScreen() {
+async function renderPromoScreen() {
+    let loadErr = '';
+    try {
+        const [sRes, bRes] = await Promise.all([
+            api('/api/admin/promotion/sources'),
+            api('/api/admin/promotion/broadcasts?limit=30')
+        ]);
+        const wrap = sRes.data || {};
+        state.promoSourcesList = Array.isArray(wrap.sources) ? wrap.sources : [];
+        state.promoBotConfigured = wrap.bot_username_configured === true;
+        state.promoBroadcastsList = Array.isArray(bRes.data) ? bRes.data : [];
+    } catch (e) {
+        loadErr = friendlyActionError(e && e.message) || String(e && e.message);
+    }
+
+    const notice = state.promoFlash ? `<p class="promo-banner promo-banner--ok">${esc(state.promoFlash)}</p>` : '';
+    state.promoFlash = '';
+
+    const botWarn = state.promoBotConfigured
+        ? ''
+        : `<p class="promo-banner promo-banner--warn">Для корректных ссылок укажите <span class="mono">TELEGRAM_BOT_USERNAME</span> или дождитесь старта бота (getMe).</p>`;
+
+    const sources = state.promoSourcesList || [];
+
+    function renderSourceRow(r) {
+        const code = String(r.code || '');
+        const expanded = !!state.promoExpandedSources[code];
+        const d = expanded ? state.promoDetailByCode[code] : null;
+        const paidN = Number(r.paid_orders_count || 0);
+        const rev = formatKopecksAsRub(r.paid_revenue_kopecks || 0);
+        const url = String(r.tracking_url || '').trim();
+        const head = `
+            <button type="button" class="promo-row${expanded ? ' promo-row--open' : ''}" data-action="promo-src-toggle" data-code="${esc(code)}">
+                <span class="promo-row__title">${esc(String(r.title || code))}</span>
+                <span class="promo-row__meta">Переходы: ${formatNum(Number(r.clicks_count || 0))} · Оплат: ${formatNum(paidN)} · ${esc(rev)}</span>
+                <span class="promo-row__code mono">${esc(code)}</span>
+            </button>`;
+        if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
+        const fullUrl = url || (d && String(d.tracking_url || '').trim()) || '';
+        const detailBlock = `
+            <div class="promo-row-detail">
+                <p class="promo-muted">Уникальных пользователей: ${formatNum(Number((d || r).unique_users_count ?? r.unique_users_count ?? 0))}</p>
+                <p class="promo-muted">Создано заказов: ${formatNum(Number(d?.created_orders_count ?? 0))}</p>
+                <p class="promo-muted">Оплаченных заказов: ${formatNum(Number((d || r).paid_orders_count ?? r.paid_orders_count ?? 0))}</p>
+                <p class="promo-muted">Сумма оплат: ${esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0))}</p>
+                <p class="promo-muted">Создан: ${esc(String((d || r).created_at || '').replace('T', ' ').slice(0, 19))}</p>
+                ${fullUrl
+            ? `
+                <div class="promo-link-block">
+                  <button type="button" class="primary promo-copy-btn" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
+                  <p class="promo-muted mono promo-link-fallback">${esc(fullUrl)}</p>
+                  <p class="promo-hint-small">Если копирование недоступно — выделите и скопируйте ссылку вручную.</p>
+                </div>`
+            : '<p class="promo-muted">Ссылка будет доступна после настройки username бота.</p>'}
+            </div>`;
+        return `<div class="promo-row-wrap">${head}${detailBlock}</div>`;
+    }
+
+    const broadcasts = state.promoBroadcastsList || [];
+    function renderBcRow(b) {
+        const id = String(b.id ?? '');
+        const expanded = !!state.promoExpandedBroadcasts[id];
+        const d = expanded ? state.promoDetailById[id] : null;
+        const txt = String(b.body_text || b.text || '');
+        const prev = txt.length > 100 ? `${txt.slice(0, 100)}…` : txt;
+        const cnt = Number(b.response_count != null ? b.response_count : 0);
+        const kw = String(b.keyword || '');
+        const extUrl = String(b.image_url || '').trim();
+        const imgSmall = extUrl
+            ? `<img class="promo-bc-thumb" src="${esc(extUrl)}" alt="" loading="lazy" />`
+            : b.has_uploaded_image
+              ? '<span class="promo-bc-thumb-placeholder" aria-hidden="true">IMG</span>'
+              : '';
+        const status = String(b.status || '');
+        const head = `
+            <button type="button" class="promo-row promo-row--bc${expanded ? ' promo-row--open' : ''}" data-action="promo-bc-toggle" data-bc-id="${esc(id)}">
+              ${imgSmall}
+              <span class="promo-row__title">${esc(prev || 'Без текста')}</span>
+              <span class="promo-row__meta">${esc(String(b.created_at || '').replace('T', ' ').slice(0, 16))} · Слово: <strong>${esc(kw)}</strong> · Отклики: ${formatNum(cnt)} · ${esc(status)}</span>
+            </button>`;
+        if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
+        const fullTxt = esc(String(d?.body_text || d?.text || txt));
+        const bigImgSrc = String((d && (d.local_image_url || d.image_url)) || b.image_url || '').trim();
+        let bigImg = '';
+        if (bigImgSrc) {
+            const needsAuth =
+                bigImgSrc.startsWith('/api/admin/promotion/broadcasts') && bigImgSrc.includes('/image');
+            bigImg = needsAuth
+                ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${esc(bigImgSrc)}" alt="" loading="lazy" />`
+                : `<img class="promo-bc-full" src="${esc(bigImgSrc)}" alt="" loading="lazy" />`;
+        }
+        const detailBlock = `
+            <div class="promo-row-detail">
+              ${bigImg}
+              <p class="promo-bc-body">${fullTxt}</p>
+              <p class="promo-muted">Откликов: ${formatNum(Number(d?.response_count ?? cnt))}</p>
+            </div>`;
+        return `<div class="promo-row-wrap">${head}${detailBlock}</div>`;
+    }
+
+    const sourceFormHtml = state.promoFormSourceOpen
+        ? `
+      <article class="dashboard-v2__card promo-form-card">
+        <h3 class="dashboard-v2__subhead">Новый источник</h3>
+        <label class="promo-field">
+          Название
+          <input type="text" id="promoSrcTitle" maxlength="120" placeholder="Instagram май 2026" />
+        </label>
+        <label class="promo-field">
+          Код (латиница, опционально)
+          <input type="text" id="promoSrcCode" maxlength="64" placeholder="instagram_may_2026" class="mono" />
+        </label>
+        <p class="promo-hint-small">Если код пустой, он будет сгенерирован из названия.</p>
+        <div class="promo-actions">
+          <button type="button" class="primary" data-action="promo-submit-source">Создать</button>
+          <button type="button" class="secondary" data-action="promo-cancel-source">Отмена</button>
+        </div>
+      </article>`
+        : '';
+
+    const broadcastFormHtml = state.promoFormBroadcastOpen
+        ? `
+      <article class="dashboard-v2__card promo-form-card">
+        <h3 class="dashboard-v2__subhead">Новая карточка рассылки</h3>
+        <p class="promo-muted">Отправка по всей базе на этом шаге не подключается — только сохранение и учёт откликов по слову.</p>
+        <label class="promo-field">
+          Текст
+          <textarea id="promoBcText" rows="5" maxlength="4096" required placeholder="Скидка 10% на букеты…"></textarea>
+        </label>
+        <label class="promo-field">
+          Кодовое слово
+          <input type="text" id="promoBcKw" maxlength="64" placeholder="роза" required />
+        </label>
+        <label class="promo-field">
+          Заголовок (опционально)
+          <input type="text" id="promoBcTitle" maxlength="120" />
+        </label>
+        <label class="promo-field">
+          Изображение (до ~600 KB)
+          <input type="file" id="promoBcImg" accept="image/*" />
+        </label>
+        <label class="promo-field">
+          Или URL картинки
+          <input type="url" id="promoBcImgUrl" maxlength="2000" placeholder="https://…" />
+        </label>
+        <div class="promo-actions">
+          <button type="button" class="primary" data-action="promo-submit-broadcast">Сохранить</button>
+          <button type="button" class="secondary" data-action="promo-cancel-broadcast">Отмена</button>
+        </div>
+      </article>`
+        : '';
+
+    const loadBlock = loadErr ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p>${esc(loadErr)}</p></article>` : '';
+
+    const sourcesEmpty =
+        sources.length === 0
+            ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p class="promo-muted">Пока нет источников. Создайте первый, чтобы получить отслеживаемые ссылки.</p></article>`
+            : '';
+
+    const bcEmpty =
+        broadcasts.length === 0
+            ? `<article class="dashboard-v2__card dashboard-v2__card--muted"><p class="promo-muted">Ещё нет карточек рассылок.</p></article>`
+            : '';
+
     return `
-        <div class="dashboard-v2 promo-stub screen-enter">
-            <h2 class="dashboard-v2__headline">ПРОДВИЖЕНИЕ</h2>
-            <article class="dashboard-v2__card dashboard-v2__card--muted">
-                <p class="promo-stub__text">Раздел «Продвижение» будет добавлен следующим этапом.</p>
-            </article>
+        <div class="dashboard-v2 promo-screen screen-enter">
+            <h2 class="dashboard-v2__headline">Продвижение</h2>
+            ${notice}${botWarn}${loadBlock}
+
+            <h3 class="dashboard-v2__section-title">Источники</h3>
+            <div class="promo-actions promo-actions--spread">
+              <button type="button" class="primary" data-action="promo-open-source-form">Создать источник</button>
+            </div>
+            ${sourceFormHtml}
+            ${sourcesEmpty}
+            <div class="promo-stack">${sources.map(renderSourceRow).join('')}</div>
+
+            <h3 class="dashboard-v2__section-title">Рассылки</h3>
+            <div class="promo-actions promo-actions--spread">
+              <button type="button" class="primary" data-action="promo-open-broadcast-form">Создать рассылку</button>
+            </div>
+            ${broadcastFormHtml}
+            ${bcEmpty}
+            <div class="promo-stack">${broadcasts.map(renderBcRow).join('')}</div>
         </div>`;
 }
 
@@ -2731,7 +2919,7 @@ async function renderSystemScreen() {
 
 async function renderScreenContent() {
     if (state.currentScreen === 'dashboard') return renderDashboardV2Screen();
-    if (state.currentScreen === 'promo') return renderPromoPlaceholderScreen();
+    if (state.currentScreen === 'promo') return renderPromoScreen();
     if (state.currentScreen === 'home') return renderHomeScreen();
     if (state.currentScreen === 'actions') return renderActionsScreen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
@@ -2758,6 +2946,7 @@ async function renderApp() {
         state.lastRefreshedAt = new Date().toISOString();
         root.innerHTML = renderShell(content);
         bindForms();
+        await hydratePromoAuthImages();
         saveUiState();
     } catch (e) {
         if (version !== renderVersion) return;
@@ -2774,6 +2963,28 @@ function bindForms() {
         state.clientsQ = input ? String(input.value || '').trim() : '';
         renderApp();
     });
+}
+
+async function hydratePromoAuthImages() {
+    const imgs = Array.from(document.querySelectorAll('img.promo-bc-await-auth[data-promo-auth-src]'));
+    if (!imgs.length) return;
+    const headers = telegramInitData ? { 'x-telegram-init-data': telegramInitData } : {};
+    await Promise.all(
+        imgs.map(async (img) => {
+            if (img.dataset.promoHydrated === '1') return;
+            const u = img.getAttribute('data-promo-auth-src');
+            if (!u) return;
+            try {
+                const res = await fetch(u, { headers, credentials: 'same-origin' });
+                if (!res.ok) return;
+                const blob = await res.blob();
+                img.src = URL.createObjectURL(blob);
+                img.dataset.promoHydrated = '1';
+            } catch (_) {
+                /* ignore */
+            }
+        })
+    );
 }
 
 async function openOrderDetail(orderId) {
@@ -3166,6 +3377,151 @@ async function handleAction(action, value, eventTarget) {
         await renderApp();
         return;
     }
+    if (action === 'promo-open-source-form') {
+        state.promoFormSourceOpen = true;
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-cancel-source') {
+        state.promoFormSourceOpen = false;
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-open-broadcast-form') {
+        state.promoFormBroadcastOpen = true;
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-cancel-broadcast') {
+        state.promoFormBroadcastOpen = false;
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-src-toggle') {
+        const code = String(value || '').trim();
+        if (!code) return;
+        const nextOpen = !state.promoExpandedSources[code];
+        state.promoExpandedSources = { ...state.promoExpandedSources, [code]: nextOpen };
+        if (nextOpen) {
+            try {
+                const payload = await api(`/api/admin/promotion/sources/${encodeURIComponent(code)}`);
+                state.promoDetailByCode = { ...state.promoDetailByCode, [code]: payload.data };
+            } catch (_) {
+                /* используем агрегаты из списка */
+            }
+        }
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-bc-toggle') {
+        const id = String(value || '').trim();
+        if (!id) return;
+        const nextOpen = !state.promoExpandedBroadcasts[id];
+        state.promoExpandedBroadcasts = { ...state.promoExpandedBroadcasts, [id]: nextOpen };
+        if (nextOpen) {
+            try {
+                const payload = await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}`);
+                state.promoDetailById = { ...state.promoDetailById, [id]: payload.data };
+            } catch (_) {
+                /**/
+            }
+        }
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-copy') {
+        const url = (eventTarget && eventTarget.getAttribute('data-copy')) || '';
+        let ok = false;
+        try {
+            if (navigator.clipboard && url && window.isSecureContext) {
+                await navigator.clipboard.writeText(url);
+                ok = true;
+            }
+        } catch (_) {
+            ok = false;
+        }
+        state.promoFlash = ok ? 'Ссылка скопирована.' : '';
+        await renderApp();
+        if (!ok && url) {
+            window.alert('Автокопирование недоступно. Ссылка показана в карточке — скопируйте её вручную.');
+        }
+        return;
+    }
+    if (action === 'promo-submit-source') {
+        const titleEl = document.getElementById('promoSrcTitle');
+        const codeEl = document.getElementById('promoSrcCode');
+        const title = titleEl ? String(titleEl.value || '').trim() : '';
+        const code = codeEl ? String(codeEl.value || '').trim() : '';
+        if (!title) {
+            window.alert('Укажите название источника.');
+            return;
+        }
+        await runGuardedAction('promo-create-src', async () => {
+            const r = await api('/api/admin/promotion/sources', {
+                method: 'POST',
+                body: JSON.stringify({ title, code: code || undefined })
+            });
+            state.promoFormSourceOpen = false;
+            const data = r.data || {};
+            const link = String(data.tracking_url || '').trim();
+            state.promoFlash = link ? `Источник создан.` : 'Источник создан.';
+            if (link) {
+                state.promoExpandedSources = { ...state.promoExpandedSources, [String(data.code || code || '').trim()]: true };
+                state.promoDetailByCode = {
+                    ...state.promoDetailByCode,
+                    [String(data.code || '').trim()]: { ...(data || {}), tracking_url: link }
+                };
+            }
+        });
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-submit-broadcast') {
+        const tEl = document.getElementById('promoBcText');
+        const kwEl = document.getElementById('promoBcKw');
+        const titleEl = document.getElementById('promoBcTitle');
+        const urlEl = document.getElementById('promoBcImgUrl');
+        const fileEl = document.getElementById('promoBcImg');
+        const text = tEl ? String(tEl.value || '').trim() : '';
+        const keyword = kwEl ? String(kwEl.value || '').trim().toLowerCase() : '';
+        const titleBc = titleEl ? String(titleEl.value || '').trim() : '';
+        const imageUrlField = urlEl ? String(urlEl.value || '').trim() : '';
+        if (!text || !keyword) {
+            window.alert('Заполните текст и кодовое слово.');
+            return;
+        }
+        let imageBase64Payload = '';
+        if (fileEl && fileEl.files && fileEl.files[0]) {
+            const file = fileEl.files[0];
+            if (file.size > 620000) {
+                window.alert('Файл изображения слишком большой (лимит ~600 KB).');
+                return;
+            }
+            imageBase64Payload = await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(typeof fr.result === 'string' ? fr.result : '');
+                fr.onerror = () => reject(new Error('FILE_READ_FAILED'));
+                fr.readAsDataURL(file);
+            });
+        }
+        await runGuardedAction('promo-create-bc', async () => {
+            await api('/api/admin/promotion/broadcasts', {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: titleBc || undefined,
+                    text,
+                    keyword,
+                    image_url: imageUrlField || undefined,
+                    image_base64: imageBase64Payload || undefined
+                })
+            });
+            state.promoFormBroadcastOpen = false;
+            state.promoFlash =
+                'Карточка рассылки создана. Массовая отправка может быть подключена отдельно. Отклики считаются по кодовому слову.';
+        });
+        await renderApp();
+        return;
+    }
     if (eventTarget && eventTarget.dataset && eventTarget.dataset.go) {
         navigateTo(eventTarget.dataset.go);
     }
@@ -3184,13 +3540,13 @@ document.addEventListener('click', async (event) => {
     if (!target) return;
     event.preventDefault();
     const action = target.getAttribute('data-action');
-    const value = target.getAttribute('data-value') || target.getAttribute('data-id');
+    const val = target.getAttribute('data-value') || target.getAttribute('data-id') || target.getAttribute('data-code') || target.getAttribute('data-bc-id');
     if (target.getAttribute('data-go') && !action) {
         navigateTo(target.getAttribute('data-go'));
         return;
     }
     try {
-        await handleAction(action, value, target);
+        await handleAction(action, val, target);
     } catch (e) {
         window.alert(friendlyActionError(e && e.message));
     }

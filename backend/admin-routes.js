@@ -1,4 +1,6 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const { ADMIN_PERMISSIONS, ALL_ADMIN_PERMISSIONS } = require('./admin-permissions');
 const { getDashboardV2ApiPayload } = require('./admin-dashboard-service');
 
@@ -7,6 +9,7 @@ function createAdminRouter({
     adminRepository,
     runtimeFlagsService,
     broadcastService,
+    promotionService,
     config,
     scanStaleMsOrderLinks
 }) {
@@ -31,7 +34,8 @@ function createAdminRouter({
                 topics: true,
                 outbox: true,
                 flags: true,
-                audit: true
+                audit: true,
+                promotion: !!promotionService
             },
             permissionsCatalog: ALL_ADMIN_PERMISSIONS
         });
@@ -254,6 +258,199 @@ function createAdminRouter({
         const data = await adminRepository.listAuditLog({ limit: req.query.limit });
         res.json({ ok: true, data });
     });
+
+    function enrichBroadcastApiRow(row, { withLocalImage = false } = {}) {
+        if (!row) return row;
+        const out = {
+            ...row,
+            text: row.body_text,
+            response_count: row.response_count != null ? Number(row.response_count) : undefined
+        };
+        delete out.body_text;
+        if (!withLocalImage && row.image_storage_path) {
+            out.has_uploaded_image = true;
+            delete out.image_storage_path;
+        }
+        if (withLocalImage && row.image_storage_path) {
+            const id = Number(row.id || 0);
+            if (id > 0) out.local_image_url = `/api/admin/promotion/broadcasts/${id}/image`;
+            delete out.image_storage_path;
+        }
+        return out;
+    }
+
+    if (promotionService) {
+        router.get(
+            '/promotion/sources',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const data = await promotionService.listSources();
+                    let botConfigured = false;
+                    try {
+                        botConfigured = !!promotionService.getBotUsername();
+                    } catch (_) {
+                        botConfigured = false;
+                    }
+                    res.json({ ok: true, data: { bot_username_configured: botConfigured, sources: data } });
+                } catch (e) {
+                    console.error('[Admin] promotion sources list failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_SOURCES_FAILED' });
+                }
+            }
+        );
+
+        router.post(
+            '/promotion/sources',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                const body = req.body || {};
+                try {
+                    const created = await promotionService.createSource({
+                        title: body.title,
+                        code: body.code,
+                        createdByTgId: req.admin.telegramId
+                    });
+                    await adminRepository.logAction({
+                        adminId: req.admin.adminId,
+                        action: 'PROMOTION_SOURCE_CREATE',
+                        entityType: 'promotion_source',
+                        entityId: created.code,
+                        details: { title: created.title }
+                    });
+                    res.json({ ok: true, data: created });
+                } catch (e) {
+                    const c = String(e.code || '');
+                    if (c === 'TITLE_REQUIRED') return res.status(400).json({ ok: false, error: c });
+                    if (c === 'TELEGRAM_BOT_USERNAME_REQUIRED') {
+                        return res.status(503).json({
+                            ok: false,
+                            error: c,
+                            message: 'Задайте TELEGRAM_BOT_USERNAME в окружении или дождитесь getMe.'
+                        });
+                    }
+                    console.error('[Admin] promotion source create failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_SOURCE_CREATE_FAILED' });
+                }
+            }
+        );
+
+        router.get(
+            '/promotion/sources/:code',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const row = await promotionService.getSourceDetail(req.params.code);
+                    if (!row) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+                    res.json({ ok: true, data: row });
+                } catch (e) {
+                    console.error('[Admin] promotion source detail failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_SOURCE_DETAIL_FAILED' });
+                }
+            }
+        );
+
+        router.get(
+            '/promotion/broadcasts',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const lim = Number(req.query.limit || 40);
+                    const rows = await promotionService.listBroadcasts(lim);
+                    res.json({
+                        ok: true,
+                        data: rows.map((row) => enrichBroadcastApiRow(row, { withLocalImage: false }))
+                    });
+                } catch (e) {
+                    console.error('[Admin] promotion broadcasts list failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_BROADCASTS_FAILED' });
+                }
+            }
+        );
+
+        router.post(
+            '/promotion/broadcasts',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                const body = req.body || {};
+                const bodyText = String(body.body_text || body.text || '').trim();
+                try {
+                    const created = await promotionService.createBroadcast({
+                        title: body.title,
+                        bodyText,
+                        keyword: body.keyword,
+                        imageUrl: body.image_url,
+                        imageBase64: body.image_base64,
+                        createdByTgId: req.admin.telegramId
+                    });
+                    await adminRepository.logAction({
+                        adminId: req.admin.adminId,
+                        action: 'PROMOTION_BROADCAST_CREATE',
+                        entityType: 'promotion_broadcast',
+                        entityId: String(created.id),
+                        details: { keyword: created.keyword }
+                    });
+                    res.json({ ok: true, data: created });
+                } catch (e) {
+                    const c = String(e.code || '');
+                    if (c === 'BODY_REQUIRED' || c === 'KEYWORD_REQUIRED') {
+                        return res.status(400).json({ ok: false, error: c });
+                    }
+                    if (c === 'KEYWORD_DUPLICATE') {
+                        return res.status(409).json({ ok: false, error: c, message: 'Такое кодовое слово уже занято.' });
+                    }
+                    if (c === 'IMAGE_TOO_LARGE' || c === 'IMAGE_INVALID') {
+                        return res.status(400).json({ ok: false, error: c });
+                    }
+                    console.error('[Admin] promotion broadcast create failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_BROADCAST_CREATE_FAILED' });
+                }
+            }
+        );
+
+        router.get(
+            '/promotion/broadcasts/:id',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const row = await promotionService.getBroadcast(req.params.id);
+                    if (!row) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+                    res.json({ ok: true, data: enrichBroadcastApiRow(row, { withLocalImage: true }) });
+                } catch (e) {
+                    console.error('[Admin] promotion broadcast detail failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_BROADCAST_DETAIL_FAILED' });
+                }
+            }
+        );
+
+        router.get(
+            '/promotion/broadcasts/:id/image',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const row = await promotionService.getBroadcast(req.params.id);
+                    if (!row || !row.image_storage_path) return res.status(404).end();
+                    const full = promotionService.resolveImageFullPath(row.image_storage_path);
+                    if (!full || !fs.existsSync(full)) return res.status(404).end();
+                    const ext = path.extname(full).toLowerCase();
+                    const type =
+                        ext === '.png'
+                            ? 'image/png'
+                            : ext === '.webp'
+                              ? 'image/webp'
+                              : ext === '.jpg' || ext === '.jpeg'
+                                ? 'image/jpeg'
+                                : 'application/octet-stream';
+                    res.setHeader('Content-Type', type);
+                    res.setHeader('Cache-Control', 'private, max-age=3600');
+                    fs.createReadStream(full).pipe(res);
+                } catch (e) {
+                    console.error('[Admin] promotion broadcast image failed:', e.message || e);
+                    res.status(500).end();
+                }
+            }
+        );
+    }
 
     return router;
 }

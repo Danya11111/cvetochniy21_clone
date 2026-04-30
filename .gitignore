@@ -3,3 +3,4 @@ backend/node_modules/
 backend/database.sqlite
 .idea
 .idea/
+backend/data/promotion-uploads/

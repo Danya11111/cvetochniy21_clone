@@ -16,6 +16,7 @@ function createTelegramUpdateHandler({
     broadcastService,
     telegramClient,
     telegramAdminDashboard,
+    promotionService,
     config,
     runtimeBotProfile = { username: null },
     logger = console
@@ -196,6 +197,15 @@ function createTelegramUpdateHandler({
                     if (botCmd.command === 'start') {
                         const startT0 = Date.now();
                         await upsertTelegramUserFromMessage(message);
+                        if (promotionService?.recordSourceClickFromStart && botCmd.payload) {
+                            try {
+                                await promotionService.recordSourceClickFromStart(message, botCmd.payload);
+                            } catch (e) {
+                                logger.warn('[Promotion] record_start_click_failed', {
+                                    message: e?.message || String(e)
+                                });
+                            }
+                        }
                         await runStartOnboarding({
                             telegramClient,
                             config,
@@ -324,6 +334,18 @@ function createTelegramUpdateHandler({
                     );
                 }
                 return;
+            }
+        }
+
+        if (chatType === 'private') {
+            const textProbe = message.text != null ? String(message.text).trim() : '';
+            if (promotionService?.handleKeywordReply && textProbe && !textProbe.startsWith('/')) {
+                try {
+                    const kwHandled = await promotionService.handleKeywordReply(telegramClient, message, logger);
+                    if (kwHandled) return;
+                } catch (e) {
+                    logger.warn('[Promotion] keyword_reply_failed', { message: e?.message || String(e) });
+                }
             }
         }
 
