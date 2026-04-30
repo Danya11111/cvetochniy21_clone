@@ -148,6 +148,14 @@ function createTelegramClient({
                 recordOutboundApi(method, r);
                 return r;
             }
+            if (method === 'editMessageText') {
+                const r = {
+                    ok: true,
+                    data: { message_id: Number(payload?.message_id) || 0 }
+                };
+                recordOutboundApi(method, r);
+                return r;
+            }
             const r = { ok: true, data: null };
             recordOutboundApi(method, r);
             return r;
@@ -266,6 +274,18 @@ function createTelegramClient({
             ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
             ...(parseMode ? { parse_mode: parseMode } : {})
         });
+    }
+
+    /** @returns {Promise<TgResult>} */
+    async function editMessageText({ chatId, messageId, text, replyMarkup, parseMode }) {
+        const payload = {
+            chat_id: chatId,
+            message_id: Number(messageId),
+            text: String(text || ''),
+            ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+            ...(parseMode ? { parse_mode: parseMode } : {})
+        };
+        return request('editMessageText', payload);
     }
 
     /** @param {{ chatId: number|string, photo: string, caption?: string, replyMarkup?: object, parseMode?: string }} opts — photo: file_id или HTTPS URL */
@@ -543,6 +563,7 @@ function createTelegramClient({
 
     return {
         sendMessage,
+        editMessageText,
         sendPhoto,
         sendPhotoFromFile,
         sendDocument,

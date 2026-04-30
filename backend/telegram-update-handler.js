@@ -15,6 +15,7 @@ function createTelegramUpdateHandler({
     supportService,
     broadcastService,
     telegramClient,
+    telegramAdminDashboard,
     config,
     runtimeBotProfile = { username: null },
     logger = console
@@ -63,6 +64,12 @@ function createTelegramUpdateHandler({
             return;
         }
         if (welcomeCb?.handled) {
+            interactiveLatency.record('callback_query_total_ms', Date.now() - cbStarted);
+            return;
+        }
+
+        if (data.startsWith('adm:')) {
+            await telegramAdminDashboard.handleAdminCallbackQuery(callbackQuery);
             interactiveLatency.record('callback_query_total_ms', Date.now() - cbStarted);
             return;
         }
@@ -197,6 +204,8 @@ function createTelegramUpdateHandler({
                             botCmd
                         });
                         interactiveLatency.record('start_command_total_ms', Date.now() - startT0);
+                    } else if (botCmd.command === 'admin') {
+                        await telegramAdminDashboard.handleAdminCommandMessage(message);
                     }
                     logger.log('[TelegramCommand] handled', {
                         command: botCmd.command,

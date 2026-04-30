@@ -1,0 +1,281 @@
+'use strict';
+
+/**
+ * Telegram admin dashboard — SQL и агрегаты (без Bot API).
+ * Денежные суммы в метриках периода — целые рубли (округление от копеек), как formatKopecksRu / kopecksToWholeRub.
+ */
+
+const db = require('./db');
+const {
+    orderPaidRevenueKopecksFromRow,
+    kopecksToWholeRub,
+    sqlOrderPaidRevenueKopecks
+} = require('./money');
+
+/** Должно совпадать с order-status.js (алиас o). */
+const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+const CANCELLED_SQL_O = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
+
+function dbGet(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+    });
+}
+
+function dbAll(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+    });
+}
+
+/** Тот же union allowlist, что и admin-auth (без проверки initData). */
+function getAdminTelegramIdSet(config) {
+    const ids = [...(config.ADMIN_TELEGRAM_IDS || []), ...(config.TELEGRAM_ADMIN_IDS || [])];
+    return new Set(ids.map(String).filter(Boolean));
+}
+
+function isAdminTelegramId(rawId, config) {
+    const id = String(rawId ?? '').trim();
+    if (!id) return false;
+    return getAdminTelegramIdSet(config).has(id);
+}
+
+/** DD.MM.YYYY в локальной TZ процесса. */
+function formatRuDate(d) {
+    const dt = d instanceof Date ? d : new Date(d);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}`;
+}
+
+/**
+ * @param {'today'|'7d'} periodKey
+ * @returns {{ periodKey: string, periodStart: Date, periodEnd: Date, periodStartIso: string, periodEndIso: string, labelFrom: string, labelTo: string }}
+ */
+function getDashboardPeriodRange(periodKey, now = new Date()) {
+    const periodEnd = new Date(now.getTime());
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+
+    let periodStart;
+    if (periodKey === 'today') {
+        periodStart = new Date(todayStart.getTime());
+    } else {
+        periodStart = new Date(todayStart.getTime());
+        periodStart.setDate(periodStart.getDate() - 6);
+    }
+
+    let labelFrom;
+    let labelTo;
+    if (periodKey === 'today') {
+        const day = formatRuDate(todayStart);
+        labelFrom = day;
+        labelTo = day;
+    } else {
+        labelFrom = formatRuDate(periodStart);
+        labelTo = formatRuDate(now);
+    }
+
+    return {
+        periodKey,
+        periodStart,
+        periodEnd,
+        periodStartIso: periodStart.toISOString(),
+        periodEndIso: periodEnd.toISOString(),
+        labelFrom,
+        labelTo
+    };
+}
+
+function isPaidOrderRow(row) {
+    return orderPaidRevenueKopecksFromRow(row) > 0;
+}
+
+/** Парсинг позиций заказа для топа (оставляем в сервисе рядом с SQL). */
+function extractItemContribution(item) {
+    if (!item || typeof item !== 'object') return null;
+    const nameRaw = item.name ?? item.title ?? item.productName ?? '';
+    const name = String(nameRaw || 'Товар').trim() || 'Товар';
+    let qty = item.quantity ?? item.qty ?? item.count ?? 1;
+    const n = Number(qty);
+    const q = Number.isFinite(n) && n > 0 ? Math.round(n) : 1;
+    return { name, qty: q };
+}
+
+function aggregateTopProductsFromOrders(orderRows) {
+    const counts = new Map();
+    for (const row of orderRows) {
+        if (!isPaidOrderRow(row)) continue;
+        let items = [];
+        try {
+            items = JSON.parse(String(row.items_json || '[]'));
+        } catch (_) {
+            continue;
+        }
+        if (!Array.isArray(items)) continue;
+        for (const it of items) {
+            const ext = extractItemContribution(it);
+            if (!ext) continue;
+            counts.set(ext.name, (counts.get(ext.name) || 0) + ext.qty);
+        }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+}
+
+/**
+ * @param {'today'|'7d'} periodKey
+ */
+async function fetchDashboardMetrics(periodKey) {
+    const range = getDashboardPeriodRange(periodKey);
+    const { periodStartIso, periodEndIso } = range;
+
+    const revExpr = sqlOrderPaidRevenueKopecks('o');
+
+    const [
+        orderRows,
+        lifetimeRow,
+        newClientsRow,
+        usersRow,
+        ordersDistinctRow,
+        ordersRepeatInPeriodRow,
+        supportRow,
+        paidInPeriodRow,
+        paidCancelledInPeriodRow
+    ] = await Promise.all([
+        dbAll(
+            `
+            SELECT id, telegram_id, created_at, status, total, total_paid, items_json
+            FROM orders
+            WHERE created_at >= ? AND created_at <= ?
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbGet(
+            `
+            SELECT
+                COALESCE(SUM((${revExpr})), 0) AS revenue_k,
+                COUNT(DISTINCT CASE WHEN (${revExpr}) > 0 THEN o.telegram_id END) AS paying_clients
+            FROM orders o
+            `,
+            []
+        ),
+        dbGet(
+            `
+            SELECT COUNT(*) AS c
+            FROM (
+                SELECT telegram_id
+                FROM orders
+                GROUP BY telegram_id
+                HAVING MIN(created_at) >= ? AND MIN(created_at) <= ?
+            ) t
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbGet(`SELECT COUNT(*) AS c FROM users`, []),
+        dbGet(`SELECT COUNT(DISTINCT telegram_id) AS c FROM orders`, []),
+        dbGet(
+            `
+            SELECT COUNT(*) AS c
+            FROM orders o
+            WHERE o.created_at >= ? AND o.created_at <= ?
+              AND (SELECT COUNT(*) FROM orders ox WHERE ox.telegram_id = o.telegram_id) > 1
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbGet(
+            `
+            SELECT AVG(
+                (julianday(first_response_at) - julianday(created_at)) * 24 * 60
+            ) AS avg_minutes
+            FROM support_threads
+            WHERE created_at >= ? AND created_at <= ?
+              AND first_response_at IS NOT NULL
+              AND TRIM(first_response_at) <> ''
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbGet(
+            `
+            SELECT COUNT(*) AS c
+            FROM orders o
+            WHERE o.created_at >= ? AND o.created_at <= ?
+              AND (${PAID_SQL_O})
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbGet(
+            `
+            SELECT COUNT(*) AS c
+            FROM orders o
+            WHERE o.created_at >= ? AND o.created_at <= ?
+              AND (${PAID_SQL_O})
+              AND (${CANCELLED_SQL_O})
+            `,
+            [periodStartIso, periodEndIso]
+        )
+    ]);
+
+    const orderRowsArr = orderRows;
+    const allOrders = orderRowsArr.length;
+    const paidOrderRows = orderRowsArr.filter(isPaidOrderRow);
+    const paidOrders = paidOrderRows.length;
+    const revenueK = paidOrderRows.reduce((acc, r) => acc + orderPaidRevenueKopecksFromRow(r), 0);
+    const revenueRub = kopecksToWholeRub(revenueK);
+    const avgCheckRub = paidOrders > 0 ? Math.round(revenueRub / paidOrders) : 0;
+
+    /**
+     * Proxy CR: доля оплаченных среди созданных в периоде (не визит → покупка).
+     */
+    const crPct = allOrders > 0 ? Math.round((paidOrders / allOrders) * 1000) / 10 : 0;
+    const repeatSharePct =
+        allOrders > 0 ? Math.round((Number(ordersRepeatInPeriodRow?.c || 0) / allOrders) * 1000) / 10 : 0;
+
+    let usersTotal = Number(usersRow?.c || 0);
+    if (!Number.isFinite(usersTotal) || usersTotal <= 0) {
+        usersTotal = Number(ordersDistinctRow?.c || 0);
+    }
+
+    const lifetimeRevenueK = Math.round(Number(lifetimeRow?.revenue_k || 0));
+    const payingClientsLifetime = Math.round(Number(lifetimeRow?.paying_clients || 0));
+    const avgLtvRub = payingClientsLifetime > 0 ? Math.round(kopecksToWholeRub(lifetimeRevenueK) / payingClientsLifetime) : 0;
+
+    const avgResp = supportRow?.avg_minutes;
+    const avgResponseMinutes =
+        avgResp != null && Number.isFinite(Number(avgResp)) ? Math.round(Number(avgResp)) : null;
+
+    /**
+     * paid_cancelled_orders / paid_orders в периоде;
+     * PAID_SQL_O + CANCELLED_SQL_O как в order-status (без отдельного refund в БД).
+     */
+    const paidDen = Number(paidInPeriodRow?.c || 0);
+    const paidCancelled = Number(paidCancelledInPeriodRow?.c || 0);
+    let returnsAfterPayPct = null;
+    if (paidDen > 0) {
+        returnsAfterPayPct = Math.round((paidCancelled / paidDen) * 1000) / 10;
+    }
+
+    const topProducts = aggregateTopProductsFromOrders(orderRowsArr);
+
+    return {
+        range,
+        revenueRub,
+        ordersTotal: allOrders,
+        paidOrders,
+        avgCheckRub,
+        newClients: Math.round(Number(newClientsRow?.c || 0)),
+        clientsTotal: usersTotal,
+        crPct,
+        repeatSharePct,
+        avgLtvRub,
+        avgResponseMinutes,
+        returnsAfterPayPct,
+        topProducts
+    };
+}
+
+module.exports = {
+    getAdminTelegramIdSet,
+    isAdminTelegramId,
+    getDashboardPeriodRange,
+    fetchDashboardMetrics,
+    formatRuDate
+};

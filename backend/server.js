@@ -75,6 +75,7 @@ const { createBroadcastService } = require('./broadcast-service');
 const telegramTransportHealth = require('./telegram-transport-health');
 const { startTelegramTransportProbe } = require('./telegram-transport-probe');
 const { createTelegramUpdateHandler } = require('./telegram-update-handler');
+const { createTelegramAdminDashboard } = require('./telegram-admin-dashboard');
 const interactiveLatency = require('./telegram-interactive-metrics');
 const { createAdminAuth } = require('./admin-auth');
 const { createAdminRepository } = require('./admin-repository');
@@ -154,10 +155,16 @@ const outboxWorker = createOutboxWorker({
     orderTopicNotificationService,
     logger: console
 });
+const telegramAdminDashboard = createTelegramAdminDashboard({
+    config,
+    telegramClient,
+    logger: console
+});
 const telegramUpdateHandler = createTelegramUpdateHandler({
     supportService,
     broadcastService,
     telegramClient,
+    telegramAdminDashboard,
     config,
     runtimeBotProfile: telegramRuntimeBotProfile,
     logger: console

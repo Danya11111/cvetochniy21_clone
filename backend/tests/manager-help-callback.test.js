@@ -40,10 +40,18 @@ const broadcastService = {
     startCampaignFromTopicMessage: async () => ({})
 };
 
+const telegramAdminDashboard = {
+    async handleAdminCallbackQuery() {
+        /* только adm:*; этот тест шлёт manager_help_request */
+    },
+    async handleAdminCommandMessage() {}
+};
+
 const { handleUpdate } = createTelegramUpdateHandler({
     supportService,
     broadcastService,
     telegramClient,
+    telegramAdminDashboard,
     config: {
         BROADCASTS_ENABLED: false,
         BROADCAST_DELETE_ENABLED: false,
