@@ -1459,6 +1459,7 @@ async function renderPromoScreen() {
         const ps = String(b.placement_status || 'draft').toLowerCase();
         const placeLabel = promoBroadcastPlacementLabel(ps);
         const canPlace = promoBroadcastCanPlace(ps);
+        const showRepeatPlace = ps === 'placed';
         const createdLine = formatPromoBroadcastDateTime(b.created_at || '');
         const detailHint =
             ps === 'place_failed' && String(b.place_error || '').trim()
@@ -1481,11 +1482,12 @@ async function renderPromoScreen() {
                 ${ps === 'placed' && b.placed_at ? `<span class="promo-bc-head__sub">В теме рассылок: ${formatPromoBroadcastDateTime(b.placed_at)}</span>` : ''}
               </span>
             </button>`;
-        const foot = canPlace
-            ? `<div class="promo-bc-foot">
-                  <button type="button" class="promo-bc-place-btn" data-action="promo-bc-place-prompt" data-bc-id="${esc(id)}">Разместить рассылку</button>
-                </div>`
-            : '';
+        const placeBtnHtml = canPlace
+            ? `<button type="button" class="promo-bc-place-btn" data-action="promo-bc-place-prompt" data-bc-id="${esc(id)}">Разместить рассылку</button>`
+            : showRepeatPlace
+              ? `<button type="button" class="promo-bc-place-btn" data-action="promo-bc-place-repeat-prompt" data-bc-id="${esc(id)}">Разместить ещё раз</button>`
+              : '';
+        const foot = placeBtnHtml ? `<div class="promo-bc-foot">${placeBtnHtml}</div>` : '';
 
         if (!expanded) {
             return `<div class="promo-bc-shell promo-row-wrap">${head}${foot}</div>`;
@@ -3576,6 +3578,51 @@ async function handleAction(action, value, eventTarget) {
         await renderApp();
         return;
     }
+    if (action === 'promo-bc-place-repeat-prompt') {
+        const id = String(value || '').trim();
+        if (!id) return;
+        openConfirmationSheet(
+            {
+                title: 'Разместить рассылку ещё раз?',
+                message:
+                    'Карточка будет повторно опубликована в теме рассылок и снова запустит сценарий доставки.',
+                impact_summary: '',
+                severity: 'high',
+                confirm_label: 'Разместить ещё раз',
+                cancel_label: 'Отмена',
+                irreversible_warning: false
+            },
+            async () => {
+                await runGuardedAction(`promo-bc-place-repeat-${id}`, async () => {
+                    try {
+                        await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}/place`, {
+                            method: 'POST'
+                        });
+                        const wasExpanded = !!state.promoExpandedBroadcasts[id];
+                        state.promoDetailById = Object.fromEntries(
+                            Object.entries(state.promoDetailById || {}).filter(([k]) => k !== id)
+                        );
+                        if (wasExpanded) {
+                            try {
+                                const payload = await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}`);
+                                state.promoDetailById = { ...state.promoDetailById, [id]: payload.data };
+                            } catch (_) {
+                                /**/
+                            }
+                        }
+                        state.promoFlash = 'Рассылка размещена повторно.';
+                    } catch (e) {
+                        window.alert(
+                            friendlyActionError(String((e && e.message) || '')) ||
+                                'Не удалось разместить рассылку повторно.'
+                        );
+                    }
+                });
+            }
+        );
+        await renderApp();
+        return;
+    }
     if (action === 'promo-bc-place-prompt') {
         const id = String(value || '').trim();
         if (!id) return;
@@ -3596,12 +3643,18 @@ async function handleAction(action, value, eventTarget) {
                         await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}/place`, {
                             method: 'POST'
                         });
+                        const wasExpanded = !!state.promoExpandedBroadcasts[id];
                         state.promoDetailById = Object.fromEntries(
                             Object.entries(state.promoDetailById || {}).filter(([k]) => k !== id)
                         );
-                        state.promoExpandedBroadcasts = Object.fromEntries(
-                            Object.entries(state.promoExpandedBroadcasts || {}).filter(([k]) => k !== id)
-                        );
+                        if (wasExpanded) {
+                            try {
+                                const payload = await api(`/api/admin/promotion/broadcasts/${encodeURIComponent(id)}`);
+                                state.promoDetailById = { ...state.promoDetailById, [id]: payload.data };
+                            } catch (_) {
+                                /**/
+                            }
+                        }
                         state.promoFlash = 'Рассылка размещена в теме рассылок.';
                     } catch (e) {
                         window.alert(

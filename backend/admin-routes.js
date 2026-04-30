@@ -478,13 +478,7 @@ function createAdminRouter({
                     if (!row) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
 
                     const psRow = String(row.placement_status || 'draft').toLowerCase();
-                    if (psRow === 'placed') {
-                        return res.status(409).json({
-                            ok: false,
-                            error: 'ALREADY_PLACED',
-                            message: 'Рассылка уже размещена в теме.'
-                        });
-                    }
+                    const repeatPlacement = psRow === 'placed';
 
                     const bcChatRaw = config.TELEGRAM_BROADCAST_TOPIC_CHAT_ID || config.TELEGRAM_FORUM_GROUP_ID;
                     const bcChat = bcChatRaw != null ? String(bcChatRaw).trim() : '';
@@ -616,7 +610,8 @@ function createAdminRouter({
                         details: {
                             campaign_id: campaignIdNum || null,
                             message_id: mid,
-                            topic_test_mode: !!flow.topicTestMode
+                            topic_test_mode: !!flow.topicTestMode,
+                            repeat_placement: repeatPlacement
                         }
                     });
 
@@ -628,7 +623,8 @@ function createAdminRouter({
                             placed_campaign_id: campaignIdNum,
                             duplicate_campaign: !!flow.duplicate,
                             topic_test_mode: !!flow.topicTestMode,
-                            test_mode_skipped: !!flow.testModeSkipped
+                            test_mode_skipped: !!flow.testModeSkipped,
+                            repeat_placement: repeatPlacement
                         }
                     });
                 } catch (e) {
