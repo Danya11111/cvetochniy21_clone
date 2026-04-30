@@ -26,7 +26,7 @@ const BOTTOM_NAV = [
 ];
 
 const SCREEN_META = {
-    dashboard: { title: 'Дашборд', subtitle: '', nav: 'dashboard' },
+    dashboard: { title: 'Админка', subtitle: '', nav: 'dashboard' },
     promo: { title: 'Продвижение', subtitle: 'Раздел в разработке', nav: 'promo' },
     home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
     actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
@@ -42,6 +42,86 @@ const SCREEN_META = {
     system: { title: 'Система', subtitle: 'Состояние', nav: 'more' }
 };
 
+/** Справка по метрикам дашборда v2 (тап для bottom-sheet на мобильных). */
+const DASH_METRIC_HELP = {
+    revenue: { title: 'Выручка', body: 'Сумма оплаченных заказов за выбранный период.' },
+    orders_count: { title: 'Заказов', body: 'Количество всех созданных заказов за выбранный период.' },
+    avg_check: { title: 'Ср. чек', body: 'Выручка за период, делённая на количество оплаченных заказов за этот период.' },
+    new_clients: { title: 'Новые клиенты', body: 'Клиенты, у которых первый заказ попал в выбранный период.' },
+    clients_total: { title: 'Клиентов всего', body: 'Общее количество клиентов в базе (или оценка по заказам, если в базе пользователей пусто).' },
+    cr: {
+        title: 'CR',
+        body: 'Прокси-конверсия: доля оплаченных заказов среди всех созданных заказов за выбранный период. Это не «визит → покупка».'
+    },
+    repeat_orders: {
+        title: 'Повторные заказы',
+        body: 'Доля заказов за период от клиентов, у которых больше одного заказа за всё время.'
+    },
+    avg_ltv: {
+        title: 'Средний LTV',
+        body: 'Средняя оплаченная выручка за всё время на одного платящего клиента (за всё время, не только за период).'
+    },
+    clients_block: {
+        title: 'Клиенты',
+        body: 'Текущее количество клиентов в базе (или оценка по уникальным telegram_id в заказах), как на сервере в метрике clientsTotal.'
+    },
+    response_time: {
+        title: 'Скорость ответа',
+        body: 'Среднее время до первого ответа поддержки по обращениям, созданным в выбранный период.'
+    },
+    abandoned_carts: {
+        title: 'Брошенные корзины',
+        body: 'Пока не рассчитывается: серверных данных о брошенных корзинах нет.'
+    },
+    returns_cancel: {
+        title: 'Возвраты / отмены после оплаты',
+        body: 'Доля оплаченных заказов за период, которые завершились отменой или возвратом (по статусам в базе данных).'
+    },
+    top_products: {
+        title: 'Топ популярных товаров',
+        body: 'Товары с наибольшим количеством продаж в оплаченных заказах за выбранный период (разбор позиций items_json).'
+    },
+    order_sources: {
+        title: 'Лучшие источники заказов',
+        body: 'Пока не рассчитывается: источники заказов ещё не собираются.'
+    }
+};
+
+function dashYmdFromDate(dt) {
+    const d = dt instanceof Date ? dt : new Date(dt);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function dashYmdAddDays(ymd, deltaDays) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
+    if (!m) return dashYmdFromDate(new Date());
+    const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    dt.setDate(dt.getDate() + Number(deltaDays || 0));
+    return dashYmdFromDate(dt);
+}
+
+/** @returns {boolean} */
+function dashIsValidYmd(s) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
+}
+
+function migrateDashboardDatesInState(saved) {
+    const rx = /^\d{4}-\d{2}-\d{2}$/;
+    if (rx.test(state.dashboardDateFrom) && rx.test(state.dashboardDateTo)) return;
+    const today = dashYmdFromDate(new Date());
+    const legacy = saved && saved.dashboardPeriod === '7d' ? '7d' : 'today';
+    if (legacy === '7d') {
+        state.dashboardDateFrom = dashYmdAddDays(today, -6);
+        state.dashboardDateTo = today;
+        state.dashboardPreset = '7d';
+    } else {
+        state.dashboardDateFrom = today;
+        state.dashboardDateTo = today;
+        state.dashboardPreset = 'today';
+    }
+}
+
 let telegramInitData = '';
 let adminConfig = null;
 let renderVersion = 0;
@@ -50,7 +130,11 @@ const inFlightActionKeys = new Set();
 
 const state = {
     currentScreen: 'dashboard',
-    dashboardPeriod: 'today',
+    dashboardDateFrom: '',
+    dashboardDateTo: '',
+    /** @type {'today'|'7d'|''} */
+    dashboardPreset: 'today',
+    dashboardRangeUiError: '',
     message: '',
     orderFilter: 'all',
     orderClientTelegramId: '',
@@ -78,14 +162,25 @@ const state = {
 };
 
 function loadUiState() {
+    /** @type {Record<string, any>} */
+    let saved = {};
     try {
         const raw = window.localStorage.getItem(UI_STATE_KEY);
-        if (!raw) return;
-        const saved = JSON.parse(raw);
-        if (!saved || typeof saved !== 'object') return;
+        if (!raw) {
+            migrateDashboardDatesInState(saved);
+            return;
+        }
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+            migrateDashboardDatesInState(saved);
+            return;
+        }
+        saved = parsed;
         const keys = [
             'currentScreen',
-            'dashboardPeriod',
+            'dashboardDateFrom',
+            'dashboardDateTo',
+            'dashboardPreset',
             'orderFilter',
             'orderClientTelegramId',
             'clientFilter',
@@ -108,13 +203,16 @@ function loadUiState() {
             }
         });
     } catch (_) {}
+    migrateDashboardDatesInState(saved);
 }
 
 function saveUiState() {
     try {
         const payload = {
             currentScreen: state.currentScreen,
-            dashboardPeriod: state.dashboardPeriod,
+            dashboardDateFrom: state.dashboardDateFrom,
+            dashboardDateTo: state.dashboardDateTo,
+            dashboardPreset: state.dashboardPreset,
             orderFilter: state.orderFilter,
             orderClientTelegramId: state.orderClientTelegramId,
             clientFilter: state.clientFilter,
@@ -137,6 +235,14 @@ function saveUiState() {
 
 function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+function friendlyDashboardBadRange(detail) {
+    const d = String(detail || '');
+    if (d === 'RANGE_INVERTED') return 'Дата «С» позже, чем «По». Укажите корректный диапазон.';
+    if (d === 'BAD_YMD') return 'Неверный формат даты. Используйте календарь.';
+    if (d === 'RANGE_TOO_WIDE') return 'Диапазон не больше 366 дней.';
+    return 'Некорректный диапазон дат.';
 }
 
 /** Runtime build id for telemetry (window + meta; must match server-injected HTML). */
@@ -716,7 +822,15 @@ async function api(path, options = {}) {
     const res = await fetch(path, { ...options, headers });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
-        throw new Error(data.error || `HTTP_${res.status}`);
+        let message = data.error ? String(data.error) : `HTTP_${res.status}`;
+        if (String(data.error) === 'DASHBOARD_V2_BAD_RANGE' && data.detail) {
+            message = friendlyDashboardBadRange(data.detail);
+        }
+        /** @type {Error & { code?: string; detail?: string }} */
+        const err = /** @type {any} */ (new Error(message));
+        err.code = data.error != null ? String(data.error) : undefined;
+        err.detail = data.detail != null ? String(data.detail) : undefined;
+        throw err;
     }
     return data;
 }
@@ -854,6 +968,39 @@ function errorState(message) {
     `;
 }
 
+function renderDashboardMetricHelpSheet() {
+    return `
+        <div id="f21-dashboard-metric-help" class="metric-help" hidden aria-hidden="true">
+            <button type="button" class="metric-help__backdrop" data-action="dash-tip-close" aria-label="Закрыть справку"></button>
+            <div class="metric-help__sheet" role="dialog" aria-modal="true" aria-labelledby="f21-dashboard-metric-help-title">
+                <h2 id="f21-dashboard-metric-help-title" class="metric-help__title"></h2>
+                <p id="f21-dashboard-metric-help-body" class="metric-help__body"></p>
+                <button type="button" class="metric-help__done" data-action="dash-tip-close">Понятно</button>
+            </div>
+        </div>
+    `;
+}
+
+function openDashboardMetricHelp(tipId) {
+    const cfg = DASH_METRIC_HELP[String(tipId || '')];
+    if (!cfg) return;
+    const root = document.getElementById('f21-dashboard-metric-help');
+    const tEl = document.getElementById('f21-dashboard-metric-help-title');
+    const bEl = document.getElementById('f21-dashboard-metric-help-body');
+    if (!root || !tEl || !bEl) return;
+    tEl.textContent = cfg.title;
+    bEl.textContent = cfg.body;
+    root.hidden = false;
+    root.setAttribute('aria-hidden', 'false');
+}
+
+function closeDashboardMetricHelp() {
+    const root = document.getElementById('f21-dashboard-metric-help');
+    if (!root) return;
+    root.hidden = true;
+    root.setAttribute('aria-hidden', 'true');
+}
+
 function loadingSkeleton() {
     return `
         <div class="screen screen-enter">
@@ -906,11 +1053,11 @@ function renderShell(contentHtml) {
                 <div class="admin-compact-header__bar">
                     <div class="admin-compact-header__lead">
                         <h1 class="admin-compact-header__title">${esc(meta.title)}</h1>
-                        <p class="admin-compact-header__subtitle">${esc(meta.subtitle)}</p>
+                        ${meta.subtitle ? `<p class="admin-compact-header__subtitle">${esc(meta.subtitle)}</p>` : ''}
                     </div>
                     <div class="admin-compact-header__toolbar" role="toolbar" aria-label="Действия шапки">
                         ${isDetailScreen ? `<button type="button" class="header-action header-action--ghost header-action--sm" data-action="${esc(backAction)}">Назад</button>` : ''}
-                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">Витрина</button>
+                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">${isDetailScreen ? 'К витрине' : 'Назад'}</button>
                         <button type="button" class="header-action header-action--primary header-action--icon" data-action="reload-screen" title="Обновить" aria-label="Обновить данные">
                             <span class="header-action__glyph" aria-hidden="true">↻</span>
                         </button>
@@ -931,6 +1078,7 @@ function renderShell(contentHtml) {
                 `).join('')}
             </nav>
             ${renderConfirmationSheet()}
+            ${renderDashboardMetricHelpSheet()}
         </main>
     `;
 }
@@ -991,24 +1139,44 @@ function dashboardFormatPct(v) {
     return r.toFixed(1);
 }
 
-function renderMiniMetricCell(label, value, danger = false) {
+function buildDashboardV2RequestPath() {
+    const f = String(state.dashboardDateFrom || '').trim();
+    const t = String(state.dashboardDateTo || '').trim();
+    return `/api/admin/dashboard-v2?from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
+}
+
+function renderMiniMetricCell(label, value, danger = false, tipId = '') {
     const dm = danger ? ' dashboard-v2__metric-cell--danger' : '';
+    const tipAttr = tipId ? ` data-action="dash-tip" data-tip-id="${esc(tipId)}"` : '';
+    const val = typeof value === 'string' ? value : esc(String(value ?? ''));
     return `
-        <div class="dashboard-v2__metric-cell${dm}">
+        <button type="button" class="dashboard-v2__metric-cell${dm}"${tipAttr} aria-label="${esc(`${label}, справка`)}">
             <span class="dashboard-v2__metric-label">${esc(label)}</span>
-            <span class="dashboard-v2__metric-value">${esc(value)}</span>
-        </div>`;
+            <span class="dashboard-v2__metric-value">${val}</span>
+        </button>`;
+}
+
+function renderDashMetricRow(labelLeft, strongInnerHtml, danger, tipId) {
+    const d = danger ? ' dashboard-v2__dash-row--danger' : '';
+    return `
+        <button type="button" class="dashboard-v2__dash-row${d}" data-action="dash-tip" data-tip-id="${esc(tipId)}">
+            <span>${esc(labelLeft)}</span><strong>${strongInnerHtml}</strong>
+        </button>`;
 }
 
 async function renderDashboardV2Screen() {
-    const periodKey = state.dashboardPeriod === '7d' ? '7d' : 'today';
-    const qp = periodKey === '7d' ? '7d' : 'today';
+    migrateDashboardDatesInState({});
+    const df = String(state.dashboardDateFrom || '').trim();
+    const dt = String(state.dashboardDateTo || '').trim();
+
     let payload;
     try {
-        payload = (await api(`/api/admin/dashboard-v2?period=${qp}`)).data;
+        payload = (await api(buildDashboardV2RequestPath())).data;
     } catch (e) {
         return errorState(e.message || 'Не удалось загрузить дашборд');
     }
+    state.dashboardRangeUiError = '';
+
     const range = payload.range || {};
     /** @type {Record<string, any>} */
     const m = payload.metrics || {};
@@ -1052,52 +1220,80 @@ async function renderDashboardV2Screen() {
         })
         .join('');
 
-    const selToday = periodKey !== '7d';
+    const presetToday = state.dashboardPreset === 'today';
+    const preset7d = state.dashboardPreset === '7d';
 
-    const speedRowCls = speedDanger ? 'dashboard-v2__dash-row dashboard-v2__dash-row--danger' : 'dashboard-v2__dash-row';
-    const cancelRowCls = cancelDanger ? 'dashboard-v2__dash-row dashboard-v2__dash-row--danger' : 'dashboard-v2__dash-row';
+    const uiErrBanner = state.dashboardRangeUiError
+        ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn" role="alert">${esc(state.dashboardRangeUiError)}</div>`
+        : '';
+
+    const revenueEscaped = esc(formatKopecksAsRub(m.revenueKopecks));
 
     return `
         <div class="dashboard-v2 screen-enter">
-            <h2 class="dashboard-v2__headline">ДАШБОРД</h2>
-            <div class="dashboard-v2__segment" role="tablist" aria-label="Период">
-                <button type="button" class="segment-pill ${selToday ? 'segment-pill--active' : ''}" data-action="dashboard-period" data-value="today">Сегодня</button>
-                <button type="button" class="segment-pill ${!selToday ? 'segment-pill--active' : ''}" data-action="dashboard-period" data-value="7d">7 дней</button>
-            </div>
-            <p class="dashboard-v2__range">${esc(range.label || '—')}</p>
+            ${uiErrBanner}
+            <section class="dashboard-v2__section" aria-labelledby="dash-heading-main">
+                <h2 id="dash-heading-main" class="dashboard-v2__headline">Основные показатели</h2>
+                <div class="dashboard-v2__date-block">
+                    <div class="dashboard-v2__preset-row" aria-label="Быстрый период">
+                        <button type="button" class="segment-pill segment-pill--compact ${presetToday ? 'segment-pill--active' : ''}" data-action="dashboard-preset-today">Сегодня</button>
+                        <button type="button" class="segment-pill segment-pill--compact ${preset7d ? 'segment-pill--active' : ''}" data-action="dashboard-preset-7d">7 дней</button>
+                    </div>
+                    <div class="dashboard-v2__manual-range">
+                        <label class="dashboard-v2__date-field">
+                            <span class="dashboard-v2__date-cap">С</span>
+                            <input class="dashboard-v2__date-input" type="date" id="dash-date-from" name="dash-from" value="${esc(df)}" autocomplete="off" />
+                        </label>
+                        <label class="dashboard-v2__date-field">
+                            <span class="dashboard-v2__date-cap">По</span>
+                            <input class="dashboard-v2__date-input" type="date" id="dash-date-to" name="dash-to" value="${esc(dt)}" autocomplete="off" />
+                        </label>
+                    </div>
+                    <div class="dashboard-v2__apply-wrap">
+                        <button type="button" class="dashboard-v2__apply" data-action="dashboard-apply-range">Применить</button>
+                    </div>
+                    <p class="dashboard-v2__range">${esc(range.label || '—')}</p>
+                </div>
 
-            <article class="dashboard-v2__revenue-card">
-                <div class="dashboard-v2__revenue-label">ВЫРУЧКА</div>
-                <div class="dashboard-v2__revenue-value">${formatKopecksAsRub(m.revenueKopecks)}</div>
-            </article>
+                <button type="button" class="dashboard-v2__revenue-card" data-action="dash-tip" data-tip-id="revenue" aria-label="Выручка, справка">
+                    <div class="dashboard-v2__revenue-label">ВЫРУЧКА</div>
+                    <div class="dashboard-v2__revenue-value">${revenueEscaped}</div>
+                </button>
 
-            <section class="dashboard-v2__grid4" aria-label="Ключевые метрики">
-                ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount))}
-                ${renderMiniMetricCell('Ср. чек', formatKopecksAsRub(m.averageCheckKopecks))}
-                ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount))}
-                ${renderMiniMetricCell('Клиентов всего', formatNum(m.clientsTotalCount))}
+                <section class="dashboard-v2__grid4" aria-label="Ключевые метрики">
+                    ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount), false, 'orders_count')}
+                    ${renderMiniMetricCell('Ср. чек', formatKopecksAsRub(m.averageCheckKopecks), false, 'avg_check')}
+                    ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount), false, 'new_clients')}
+                    ${renderMiniMetricCell('Клиентов всего', formatNum(m.clientsTotalCount), false, 'clients_total')}
+                </section>
             </section>
 
             <h3 class="dashboard-v2__section-title">Клиенты и заказы</h3>
             <div class="dashboard-v2__stack">
-                <div class="dashboard-v2__dash-row"><span>CR</span><strong>${crLine}%</strong></div>
-                <div class="dashboard-v2__dash-row"><span>Повторные заказы</span><strong>${dashboardFormatPct(m.repeatOrdersPercent)}%</strong></div>
-                <div class="dashboard-v2__dash-row"><span>Средний LTV</span><strong>${formatKopecksAsRub(m.averageLtvKopecks)}</strong></div>
-                <div class="dashboard-v2__dash-row"><span>Клиенты</span><strong>${formatNum(m.clientsTotalCount)}</strong></div>
+                ${renderDashMetricRow('CR', `${esc(crLine)}%`, false, 'cr')}
+                ${renderDashMetricRow('Повторные заказы', `${esc(dashboardFormatPct(m.repeatOrdersPercent))}%`, false, 'repeat_orders')}
+                ${renderDashMetricRow('Средний LTV', esc(formatKopecksAsRub(m.averageLtvKopecks)), false, 'avg_ltv')}
+                ${renderDashMetricRow('Клиенты', esc(formatNum(m.clientsTotalCount)), false, 'clients_block')}
             </div>
 
             <h3 class="dashboard-v2__section-title">Сервис и качество</h3>
             <div class="dashboard-v2__stack">
-                <div class="${speedRowCls}"><span>Скорость ответа</span><strong>${esc(speedText)}</strong></div>
-                <div class="dashboard-v2__dash-row"><span>Брошенные корзины</span><strong>нет данных</strong></div>
-                <div class="${cancelRowCls}"><span>Возвраты / отмены после оплаты</span><strong>${esc(cancelText)}</strong></div>
+                ${renderDashMetricRow('Скорость ответа', esc(speedText), speedDanger, 'response_time')}
+                ${renderDashMetricRow('Брошенные корзины', esc('нет данных'), false, 'abandoned_carts')}
+                ${renderDashMetricRow('Возвраты / отмены после оплаты', esc(cancelText), cancelDanger, 'returns_cancel')}
             </div>
 
             <h3 class="dashboard-v2__section-title">Аналитика</h3>
-            <p class="dashboard-v2__subhead">Топ популярных товаров</p>
+            <button type="button" class="dashboard-v2__analytics-tap" data-action="dash-tip" data-tip-id="top_products" aria-label="Топ товаров, справка">
+                <span class="dashboard-v2__subhead">Топ популярных товаров</span>
+                <span class="dashboard-v2__subhead-hint" aria-hidden="true">?</span>
+            </button>
             <article class="dashboard-v2__card">${topListHtml}</article>
 
-            <p class="dashboard-v2__subhead">Лучшие источники заказов</p>
+            <button type="button" class="dashboard-v2__analytics-tap" data-action="dash-tip" data-tip-id="order_sources" aria-label="Источники заказов, справка">
+                <span class="dashboard-v2__subhead">Лучшие источники заказов</span>
+                <span class="dashboard-v2__subhead-hint" aria-hidden="true">?</span>
+            </button>
             <article class="dashboard-v2__card dashboard-v2__card--muted">
                 <div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>
             </article>
@@ -2656,9 +2852,52 @@ async function handleAction(action, value, eventTarget) {
         await renderApp();
         return;
     }
-    if (action === 'dashboard-period') {
-        const v = String(value || '').toLowerCase();
-        state.dashboardPeriod = v === '7d' ? '7d' : 'today';
+    if (action === 'dash-tip-close') {
+        closeDashboardMetricHelp();
+        return;
+    }
+    if (action === 'dash-tip') {
+        const id = eventTarget && eventTarget.getAttribute ? eventTarget.getAttribute('data-tip-id') : '';
+        openDashboardMetricHelp(id);
+        return;
+    }
+    if (action === 'dashboard-preset-today') {
+        const today = dashYmdFromDate(new Date());
+        state.dashboardDateFrom = today;
+        state.dashboardDateTo = today;
+        state.dashboardPreset = 'today';
+        state.dashboardRangeUiError = '';
+        await renderApp();
+        return;
+    }
+    if (action === 'dashboard-preset-7d') {
+        const today = dashYmdFromDate(new Date());
+        state.dashboardDateFrom = dashYmdAddDays(today, -6);
+        state.dashboardDateTo = today;
+        state.dashboardPreset = '7d';
+        state.dashboardRangeUiError = '';
+        await renderApp();
+        return;
+    }
+    if (action === 'dashboard-apply-range') {
+        const frEl = document.getElementById('dash-date-from');
+        const toEl = document.getElementById('dash-date-to');
+        const nf = frEl ? String(frEl.value || '').trim() : '';
+        const nt = toEl ? String(toEl.value || '').trim() : '';
+        if (!dashIsValidYmd(nf) || !dashIsValidYmd(nt)) {
+            state.dashboardRangeUiError = 'Выберите корректные даты.';
+            await renderApp();
+            return;
+        }
+        if (nf > nt) {
+            state.dashboardRangeUiError = 'Дата «С» не может быть позже «По».';
+            await renderApp();
+            return;
+        }
+        state.dashboardDateFrom = nf;
+        state.dashboardDateTo = nt;
+        state.dashboardPreset = '';
+        state.dashboardRangeUiError = '';
         await renderApp();
         return;
     }
@@ -2925,6 +3164,14 @@ async function handleAction(action, value, eventTarget) {
         navigateTo(eventTarget.dataset.go);
     }
 }
+
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const el = document.getElementById('f21-dashboard-metric-help');
+    if (el && !el.hidden) {
+        closeDashboardMetricHelp();
+    }
+});
 
 document.addEventListener('click', async (event) => {
     const target = event.target.closest('[data-action], [data-go]');

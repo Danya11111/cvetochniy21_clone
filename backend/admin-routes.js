@@ -48,14 +48,29 @@ function createAdminRouter({
     });
 
     router.get('/dashboard-v2', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
-        const raw = String(req.query.period || 'today').toLowerCase();
-        const periodKey = raw === '7d' ? '7d' : 'today';
+        const ymdRx = /^\d{4}-\d{2}-\d{2}$/;
+        const qFrom = String(req.query.from ?? '').trim();
+        const qTo = String(req.query.to ?? '').trim();
         try {
-            const data = await getDashboardV2ApiPayload(periodKey);
-            res.json({ ok: true, data });
+            if (qFrom && qTo && ymdRx.test(qFrom) && ymdRx.test(qTo)) {
+                const data = await getDashboardV2ApiPayload({ fromYmd: qFrom, toYmd: qTo });
+                return res.json({ ok: true, data });
+            }
+            const raw = String(req.query.period || 'today').toLowerCase();
+            const periodKey = raw === '7d' ? '7d' : 'today';
+            const data = await getDashboardV2ApiPayload({ periodKey });
+            return res.json({ ok: true, data });
         } catch (e) {
-            console.error('[Admin] dashboard-v2 failed:', e.message || e);
-            res.status(500).json({ ok: false, error: 'DASHBOARD_V2_FAILED' });
+            const msg = String((e && e.message) || e || '');
+            if (msg === 'BAD_YMD' || msg === 'RANGE_INVERTED' || msg === 'RANGE_TOO_WIDE') {
+                return res.status(400).json({
+                    ok: false,
+                    error: 'DASHBOARD_V2_BAD_RANGE',
+                    detail: msg
+                });
+            }
+            console.error('[Admin] dashboard-v2 failed:', msg);
+            return res.status(500).json({ ok: false, error: 'DASHBOARD_V2_FAILED' });
         }
     });
 

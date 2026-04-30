@@ -86,6 +86,50 @@ function getDashboardPeriodRange(periodKey, now = new Date()) {
     };
 }
 
+/** @param {string} ymd */
+function parseYmdPartsStrict(ymd) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return { y, mo, d };
+}
+
+/**
+ * Диапазон по календарным дням в локальной TZ процесса: с 00:00:00 «from» до 23:59:59.999 «to».
+ * @throws {Error} BAD_YMD | RANGE_INVERTED | RANGE_TOO_WIDE
+ */
+function getCustomDashboardPeriodRange(fromYmd, toYmd) {
+    const pf = parseYmdPartsStrict(fromYmd);
+    const pt = parseYmdPartsStrict(toYmd);
+    if (!pf || !pt) {
+        throw new Error('BAD_YMD');
+    }
+    const periodStart = new Date(pf.y, pf.mo - 1, pf.d, 0, 0, 0, 0);
+    const periodEnd = new Date(pt.y, pt.mo - 1, pt.d, 23, 59, 59, 999);
+    if (periodStart.getTime() > periodEnd.getTime()) {
+        throw new Error('RANGE_INVERTED');
+    }
+    const maxMs = 366 * 24 * 60 * 60 * 1000;
+    if (periodEnd.getTime() - periodStart.getTime() > maxMs) {
+        throw new Error('RANGE_TOO_WIDE');
+    }
+    return {
+        periodKey: 'custom',
+        periodStart,
+        periodEnd,
+        periodStartIso: periodStart.toISOString(),
+        periodEndIso: periodEnd.toISOString(),
+        labelFrom: formatRuDate(periodStart),
+        labelTo: formatRuDate(periodEnd)
+    };
+}
+
 function isPaidOrderRow(row) {
     return orderPaidRevenueKopecksFromRow(row) > 0;
 }
@@ -122,10 +166,9 @@ function aggregateTopProductsFromOrders(orderRows) {
 }
 
 /**
- * @param {'today'|'7d'} periodKey
+ * Все агрегаты для произвольного диапазона [periodStartIso, periodEndIso] (как у preset-периода).
  */
-async function fetchDashboardMetrics(periodKey) {
-    const range = getDashboardPeriodRange(periodKey);
+async function fetchDashboardMetricsForRange(range) {
     const { periodStartIso, periodEndIso } = range;
 
     const revExpr = sqlOrderPaidRevenueKopecks('o');
@@ -257,7 +300,6 @@ async function fetchDashboardMetrics(periodKey) {
     const topProducts = aggregateTopProductsFromOrders(orderRowsArr);
 
     return {
-        range,
         revenueKopecks: revenueK,
         revenueRub,
         ordersTotal: allOrders,
@@ -277,17 +319,40 @@ async function fetchDashboardMetrics(periodKey) {
 }
 
 /**
- * Ответ Mini App для GET /api/admin/dashboard-v2 (?period=today|7d).
+ * @param {'today'|'7d'} periodKey
  */
-async function getDashboardV2ApiPayload(periodKey) {
-    const pk = periodKey === '7d' ? '7d' : 'today';
-    const m = await fetchDashboardMetrics(pk);
+async function fetchDashboardMetrics(periodKey) {
+    const range = getDashboardPeriodRange(periodKey);
+    const metrics = await fetchDashboardMetricsForRange(range);
+    return { range, ...metrics };
+}
+
+/**
+ * Ответ Mini App для GET /api/admin/dashboard-v2:
+ * (?period=today|7d) или (?from=YYYY-MM-DD&to=YYYY-MM-DD).
+ */
+async function getDashboardV2ApiPayload(opts) {
+    /** @type {ReturnType<typeof getDashboardPeriodRange>|ReturnType<typeof getCustomDashboardPeriodRange>} */
+    let range;
+    /** @type {string} */
+    let periodApi;
+
+    if (opts && typeof opts === 'object' && opts.fromYmd && opts.toYmd) {
+        range = getCustomDashboardPeriodRange(String(opts.fromYmd).trim(), String(opts.toYmd).trim());
+        periodApi = 'custom';
+    } else {
+        const pk = opts === '7d' || (opts && opts.periodKey === '7d') ? '7d' : 'today';
+        range = getDashboardPeriodRange(pk);
+        periodApi = pk;
+    }
+
+    const m = await fetchDashboardMetricsForRange(range);
     return {
-        period: pk,
+        period: periodApi,
         range: {
-            from: m.range.periodStartIso,
-            to: m.range.periodEndIso,
-            label: `${m.range.labelFrom} — ${m.range.labelTo}`
+            from: range.periodStartIso,
+            to: range.periodEndIso,
+            label: `${range.labelFrom} — ${range.labelTo}`
         },
         metrics: {
             revenueKopecks: Math.round(Number(m.revenueKopecks || 0)),
@@ -316,6 +381,8 @@ module.exports = {
     getAdminTelegramIdSet,
     isAdminTelegramId,
     getDashboardPeriodRange,
+    getCustomDashboardPeriodRange,
+    fetchDashboardMetricsForRange,
     fetchDashboardMetrics,
     getDashboardV2ApiPayload,
     formatRuDate
