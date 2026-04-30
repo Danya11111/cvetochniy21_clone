@@ -221,6 +221,7 @@ async function fetchDashboardMetrics(periodKey) {
     const revenueK = paidOrderRows.reduce((acc, r) => acc + orderPaidRevenueKopecksFromRow(r), 0);
     const revenueRub = kopecksToWholeRub(revenueK);
     const avgCheckRub = paidOrders > 0 ? Math.round(revenueRub / paidOrders) : 0;
+    const avgCheckKopecks = paidOrders > 0 ? Math.round(revenueK / paidOrders) : 0;
 
     /**
      * Proxy CR: доля оплаченных среди созданных в периоде (не визит → покупка).
@@ -237,7 +238,7 @@ async function fetchDashboardMetrics(periodKey) {
     const lifetimeRevenueK = Math.round(Number(lifetimeRow?.revenue_k || 0));
     const payingClientsLifetime = Math.round(Number(lifetimeRow?.paying_clients || 0));
     const avgLtvRub = payingClientsLifetime > 0 ? Math.round(kopecksToWholeRub(lifetimeRevenueK) / payingClientsLifetime) : 0;
-
+    const avgLtvKopecks = payingClientsLifetime > 0 ? Math.round(lifetimeRevenueK / payingClientsLifetime) : 0;
     const avgResp = supportRow?.avg_minutes;
     const avgResponseMinutes =
         avgResp != null && Number.isFinite(Number(avgResp)) ? Math.round(Number(avgResp)) : null;
@@ -257,18 +258,57 @@ async function fetchDashboardMetrics(periodKey) {
 
     return {
         range,
+        revenueKopecks: revenueK,
         revenueRub,
         ordersTotal: allOrders,
         paidOrders,
         avgCheckRub,
+        avgCheckKopecks,
         newClients: Math.round(Number(newClientsRow?.c || 0)),
         clientsTotal: usersTotal,
         crPct,
         repeatSharePct,
         avgLtvRub,
+        avgLtvKopecks,
         avgResponseMinutes,
         returnsAfterPayPct,
         topProducts
+    };
+}
+
+/**
+ * Ответ Mini App для GET /api/admin/dashboard-v2 (?period=today|7d).
+ */
+async function getDashboardV2ApiPayload(periodKey) {
+    const pk = periodKey === '7d' ? '7d' : 'today';
+    const m = await fetchDashboardMetrics(pk);
+    return {
+        period: pk,
+        range: {
+            from: m.range.periodStartIso,
+            to: m.range.periodEndIso,
+            label: `${m.range.labelFrom} — ${m.range.labelTo}`
+        },
+        metrics: {
+            revenueKopecks: Math.round(Number(m.revenueKopecks || 0)),
+            ordersCount: m.ordersTotal,
+            paidOrdersCount: m.paidOrders,
+            averageCheckKopecks: Math.round(Number(m.avgCheckKopecks || 0)),
+            newClientsCount: m.newClients,
+            clientsTotalCount: m.clientsTotal,
+            crPercent: m.crPct,
+            repeatOrdersPercent: m.repeatSharePct,
+            averageLtvKopecks: Math.round(Number(m.avgLtvKopecks || 0)),
+            avgFirstResponseMinutes:
+                m.avgResponseMinutes == null ? null : Math.round(Number(m.avgResponseMinutes)),
+            abandonedCarts: null,
+            paidCancelledPercent: m.returnsAfterPayPct
+        },
+        topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map(([name, qty]) => ({
+            name: String(name || ''),
+            quantity: Math.round(Number(qty || 0))
+        })),
+        sources: []
     };
 }
 
@@ -277,5 +317,6 @@ module.exports = {
     isAdminTelegramId,
     getDashboardPeriodRange,
     fetchDashboardMetrics,
+    getDashboardV2ApiPayload,
     formatRuDate
 };

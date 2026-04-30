@@ -1,15 +1,33 @@
 const INIT_DATA_PARAM = 'tgWebAppData';
 const UI_STATE_KEY = 'admin_mobile_ui_state_v1';
-const SCREEN_IDS = ['home', 'actions', 'orders', 'clients', 'client_detail', 'broadcasts', 'broadcast_detail', 'more', 'support', 'analytics', 'topics', 'system'];
+const SCREEN_IDS = [
+    'dashboard',
+    'promo',
+    'home',
+    'actions',
+    'orders',
+    'clients',
+    'client_detail',
+    'broadcasts',
+    'broadcast_detail',
+    'more',
+    'support',
+    'analytics',
+    'topics',
+    'system'
+];
+
+/** Доступные из нижнего меню вкладки (Mini App v2). */
+const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
+
 const BOTTOM_NAV = [
-    { id: 'home', label: 'Главная' },
-    { id: 'orders', label: 'Заказы' },
-    { id: 'clients', label: 'Клиенты' },
-    { id: 'broadcasts', label: 'Рассылки' },
-    { id: 'more', label: 'Ещё' }
+    { id: BOTTOM_NAV_IDS.DASHBOARD, label: 'Дашборд' },
+    { id: BOTTOM_NAV_IDS.PROMO, label: 'Продвижение' }
 ];
 
 const SCREEN_META = {
+    dashboard: { title: 'Дашборд', subtitle: '', nav: 'dashboard' },
+    promo: { title: 'Продвижение', subtitle: 'Раздел в разработке', nav: 'promo' },
     home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
     actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
     orders: { title: 'Заказы', subtitle: 'Статусы и фильтры', nav: 'orders' },
@@ -31,7 +49,8 @@ let pendingConfirmationHandler = null;
 const inFlightActionKeys = new Set();
 
 const state = {
-    currentScreen: 'home',
+    currentScreen: 'dashboard',
+    dashboardPeriod: 'today',
     message: '',
     orderFilter: 'all',
     orderClientTelegramId: '',
@@ -65,6 +84,8 @@ function loadUiState() {
         const saved = JSON.parse(raw);
         if (!saved || typeof saved !== 'object') return;
         const keys = [
+            'currentScreen',
+            'dashboardPeriod',
             'orderFilter',
             'orderClientTelegramId',
             'clientFilter',
@@ -92,6 +113,8 @@ function loadUiState() {
 function saveUiState() {
     try {
         const payload = {
+            currentScreen: state.currentScreen,
+            dashboardPeriod: state.dashboardPeriod,
             orderFilter: state.orderFilter,
             orderClientTelegramId: state.orderClientTelegramId,
             clientFilter: state.clientFilter,
@@ -453,7 +476,7 @@ async function launchPlaybook(playbookId, entrySource = '') {
     state.activePlaybook = next;
     applyPlaybookTarget(next);
     saveUiState();
-    navigateTo(next.suggested_target || 'home');
+    navigateTo(next.suggested_target || 'dashboard');
 }
 
 function renderPlaybookCards({ source = '', target = '', limit = 4 } = {}) {
@@ -617,8 +640,12 @@ function buildTopicLink(chatId, threadId) {
 }
 
 function resolveScreenFromHash() {
-    const candidate = String((location.hash || '').replace('#', '') || 'home').trim().toLowerCase();
-    return SCREEN_IDS.includes(candidate) ? candidate : 'home';
+    const raw = String((location.hash || '').replace('#', '') || '').trim().toLowerCase();
+    const candidate = raw || 'dashboard';
+    if (candidate === BOTTOM_NAV_IDS.DASHBOARD || candidate === BOTTOM_NAV_IDS.PROMO) {
+        return candidate;
+    }
+    return BOTTOM_NAV_IDS.DASHBOARD;
 }
 
 function resolveStorefrontReturnPath() {
@@ -648,7 +675,10 @@ function returnToStorefront() {
 }
 
 function navigateTo(screenId) {
-    const next = SCREEN_IDS.includes(screenId) ? screenId : 'home';
+    let next = String(screenId || '').trim().toLowerCase();
+    if (next !== BOTTOM_NAV_IDS.DASHBOARD && next !== BOTTOM_NAV_IDS.PROMO) {
+        next = BOTTOM_NAV_IDS.DASHBOARD;
+    }
     if (location.hash !== `#${next}`) {
         saveUiState();
         location.hash = next;
@@ -895,7 +925,7 @@ function renderShell(contentHtml) {
             <section id="screenContent" class="screen screen-enter admin-screen-content">${contentHtml}</section>
             <nav class="bottom-nav" aria-label="Основные разделы">
                 ${BOTTOM_NAV.map((item) => `
-                    <button type="button" class="bottom-nav-item ${navBase === item.id ? 'active' : ''}" data-go="${item.id}">
+                    <button type="button" class="bottom-nav-item ${navBase === item.id ? 'active' : ''}" data-go="${esc(item.id)}">
                         <span class="bottom-nav-item__label">${esc(item.label)}</span>
                     </button>
                 `).join('')}
@@ -948,6 +978,140 @@ function insightTone(tone) {
     if (tone === 'warn') return 'warn';
     if (tone === 'ok') return 'ok';
     return 'info';
+}
+
+/**
+ * Отображение долей без лишних нулей.
+ */
+function dashboardFormatPct(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '0';
+    const r = Math.round(n * 10) / 10;
+    if (Math.abs(r - Math.round(r)) < 1e-9) return String(Math.round(r));
+    return r.toFixed(1);
+}
+
+function renderMiniMetricCell(label, value, danger = false) {
+    const dm = danger ? ' dashboard-v2__metric-cell--danger' : '';
+    return `
+        <div class="dashboard-v2__metric-cell${dm}">
+            <span class="dashboard-v2__metric-label">${esc(label)}</span>
+            <span class="dashboard-v2__metric-value">${esc(value)}</span>
+        </div>`;
+}
+
+async function renderDashboardV2Screen() {
+    const periodKey = state.dashboardPeriod === '7d' ? '7d' : 'today';
+    const qp = periodKey === '7d' ? '7d' : 'today';
+    let payload;
+    try {
+        payload = (await api(`/api/admin/dashboard-v2?period=${qp}`)).data;
+    } catch (e) {
+        return errorState(e.message || 'Не удалось загрузить дашборд');
+    }
+    const range = payload.range || {};
+    /** @type {Record<string, any>} */
+    const m = payload.metrics || {};
+    const topProducts = Array.isArray(payload.topProducts) ? payload.topProducts : [];
+
+    const speedMinutes = m.avgFirstResponseMinutes;
+    const speedIsNum = typeof speedMinutes === 'number' && Number.isFinite(speedMinutes);
+    const speedDanger = speedIsNum && speedMinutes > 12;
+    const speedSuffix = speedDanger ? ' — выше нормы' : '';
+    const speedText = speedIsNum ? `${Math.round(speedMinutes)} мин${speedSuffix}` : 'нет данных';
+
+    const cancelPctRaw = m.paidCancelledPercent;
+    const cancelIsNum = typeof cancelPctRaw === 'number' && Number.isFinite(cancelPctRaw);
+    const cancelDanger = cancelIsNum && cancelPctRaw > 7;
+    const cancelSuffix = cancelDanger ? ' — выше нормы' : '';
+    const cancelText = cancelIsNum ? `${dashboardFormatPct(cancelPctRaw)}%${cancelSuffix}` : 'нет данных';
+
+    /*
+     * Proxy CR: paid_orders_count / orders_count · 100 за период (не конверсия «визит → покупка»).
+     * Источник и определение — см. backend/admin-dashboard-service.js.
+     */
+    const crLine = dashboardFormatPct(m.crPercent);
+
+    const topSlots = [{ name: '', quantity: 0 }, { name: '', quantity: 0 }, { name: '', quantity: 0 }];
+    topProducts.slice(0, 3).forEach((row, idx) => {
+        topSlots[idx] = {
+            name: row != null && row.name != null ? String(row.name) : '',
+            quantity: Math.round(Number(row && row.quantity) || 0)
+        };
+    });
+    const topListHtml = topSlots
+        .map((row, i) => {
+            const nameStr = String(row.name || '').trim();
+            const hasName = nameStr.length > 0;
+            const lineBody = hasName ? `${nameStr} — ${row.quantity} шт` : 'нет данных';
+            return `
+                <div class="dashboard-v2__top-row">
+                    <span class="dash-rank">${i + 1}</span>
+                    <span class="dash-top-meta">${esc(lineBody)}</span>
+                </div>`;
+        })
+        .join('');
+
+    const selToday = periodKey !== '7d';
+
+    const speedRowCls = speedDanger ? 'dashboard-v2__dash-row dashboard-v2__dash-row--danger' : 'dashboard-v2__dash-row';
+    const cancelRowCls = cancelDanger ? 'dashboard-v2__dash-row dashboard-v2__dash-row--danger' : 'dashboard-v2__dash-row';
+
+    return `
+        <div class="dashboard-v2 screen-enter">
+            <h2 class="dashboard-v2__headline">ДАШБОРД</h2>
+            <div class="dashboard-v2__segment" role="tablist" aria-label="Период">
+                <button type="button" class="segment-pill ${selToday ? 'segment-pill--active' : ''}" data-action="dashboard-period" data-value="today">Сегодня</button>
+                <button type="button" class="segment-pill ${!selToday ? 'segment-pill--active' : ''}" data-action="dashboard-period" data-value="7d">7 дней</button>
+            </div>
+            <p class="dashboard-v2__range">${esc(range.label || '—')}</p>
+
+            <article class="dashboard-v2__revenue-card">
+                <div class="dashboard-v2__revenue-label">ВЫРУЧКА</div>
+                <div class="dashboard-v2__revenue-value">${formatKopecksAsRub(m.revenueKopecks)}</div>
+            </article>
+
+            <section class="dashboard-v2__grid4" aria-label="Ключевые метрики">
+                ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount))}
+                ${renderMiniMetricCell('Ср. чек', formatKopecksAsRub(m.averageCheckKopecks))}
+                ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount))}
+                ${renderMiniMetricCell('Клиентов всего', formatNum(m.clientsTotalCount))}
+            </section>
+
+            <h3 class="dashboard-v2__section-title">Клиенты и заказы</h3>
+            <div class="dashboard-v2__stack">
+                <div class="dashboard-v2__dash-row"><span>CR</span><strong>${crLine}%</strong></div>
+                <div class="dashboard-v2__dash-row"><span>Повторные заказы</span><strong>${dashboardFormatPct(m.repeatOrdersPercent)}%</strong></div>
+                <div class="dashboard-v2__dash-row"><span>Средний LTV</span><strong>${formatKopecksAsRub(m.averageLtvKopecks)}</strong></div>
+                <div class="dashboard-v2__dash-row"><span>Клиенты</span><strong>${formatNum(m.clientsTotalCount)}</strong></div>
+            </div>
+
+            <h3 class="dashboard-v2__section-title">Сервис и качество</h3>
+            <div class="dashboard-v2__stack">
+                <div class="${speedRowCls}"><span>Скорость ответа</span><strong>${esc(speedText)}</strong></div>
+                <div class="dashboard-v2__dash-row"><span>Брошенные корзины</span><strong>нет данных</strong></div>
+                <div class="${cancelRowCls}"><span>Возвраты / отмены после оплаты</span><strong>${esc(cancelText)}</strong></div>
+            </div>
+
+            <h3 class="dashboard-v2__section-title">Аналитика</h3>
+            <p class="dashboard-v2__subhead">Топ популярных товаров</p>
+            <article class="dashboard-v2__card">${topListHtml}</article>
+
+            <p class="dashboard-v2__subhead">Лучшие источники заказов</p>
+            <article class="dashboard-v2__card dashboard-v2__card--muted">
+                <div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>
+            </article>
+        </div>`;
+}
+
+function renderPromoPlaceholderScreen() {
+    return `
+        <div class="dashboard-v2 promo-stub screen-enter">
+            <h2 class="dashboard-v2__headline">ПРОДВИЖЕНИЕ</h2>
+            <article class="dashboard-v2__card dashboard-v2__card--muted">
+                <p class="promo-stub__text">Раздел «Продвижение» будет добавлен следующим этапом.</p>
+            </article>
+        </div>`;
 }
 
 async function renderHomeScreen() {
@@ -2364,6 +2528,8 @@ async function renderSystemScreen() {
 }
 
 async function renderScreenContent() {
+    if (state.currentScreen === 'dashboard') return renderDashboardV2Screen();
+    if (state.currentScreen === 'promo') return renderPromoPlaceholderScreen();
     if (state.currentScreen === 'home') return renderHomeScreen();
     if (state.currentScreen === 'actions') return renderActionsScreen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
@@ -2376,7 +2542,7 @@ async function renderScreenContent() {
     if (state.currentScreen === 'analytics') return renderAnalyticsScreen();
     if (state.currentScreen === 'topics') return renderTopicsScreen();
     if (state.currentScreen === 'system') return renderSystemScreen();
-    return renderHomeScreen();
+    return renderDashboardV2Screen();
 }
 
 async function renderApp() {
@@ -2487,6 +2653,12 @@ async function handleAction(action, value, eventTarget) {
         try {
             await ensurePlaybooksSummary(true);
         } catch (_) {}
+        await renderApp();
+        return;
+    }
+    if (action === 'dashboard-period') {
+        const v = String(value || '').toLowerCase();
+        state.dashboardPeriod = v === '7d' ? '7d' : 'today';
         await renderApp();
         return;
     }
@@ -2793,6 +2965,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     loadUiState();
     state.currentScreen = resolveScreenFromHash();
+    if (!String(location.hash || '').replace(/^#/, '')) {
+        try {
+            const q = typeof location.search === 'string' ? location.search : '';
+            history.replaceState(null, '', `${location.pathname}${q}#${BOTTOM_NAV_IDS.DASHBOARD}`);
+        } catch (_) {
+            location.hash = BOTTOM_NAV_IDS.DASHBOARD;
+        }
+    }
     try {
         await ensureAuth();
         console.log('[AdminEmbedApp] mount_ok', {

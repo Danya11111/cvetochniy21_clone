@@ -1,5 +1,6 @@
 const express = require('express');
 const { ADMIN_PERMISSIONS, ALL_ADMIN_PERMISSIONS } = require('./admin-permissions');
+const { getDashboardV2ApiPayload } = require('./admin-dashboard-service');
 
 function createAdminRouter({
     auth,
@@ -44,6 +45,18 @@ function createAdminRouter({
     router.get('/mobile-summary', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
         const data = await adminRepository.getMobileSummary();
         res.json({ ok: true, data });
+    });
+
+    router.get('/dashboard-v2', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
+        const raw = String(req.query.period || 'today').toLowerCase();
+        const periodKey = raw === '7d' ? '7d' : 'today';
+        try {
+            const data = await getDashboardV2ApiPayload(periodKey);
+            res.json({ ok: true, data });
+        } catch (e) {
+            console.error('[Admin] dashboard-v2 failed:', e.message || e);
+            res.status(500).json({ ok: false, error: 'DASHBOARD_V2_FAILED' });
+        }
     });
 
     router.get('/analytics/summary', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
