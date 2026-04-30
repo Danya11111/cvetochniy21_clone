@@ -1345,32 +1345,44 @@ async function renderPromoScreen() {
         const code = String(r.code || '');
         const expanded = !!state.promoExpandedSources[code];
         const d = expanded ? state.promoDetailByCode[code] : null;
-        const paidN = Number(r.paid_orders_count || 0);
-        const rev = formatKopecksAsRub(r.paid_revenue_kopecks || 0);
+        const listClicks = Number(r.clicks_count || 0);
+        const listPaid = Number(r.paid_orders_count || 0);
+        const listRevStr = esc(formatKopecksAsRub(r.paid_revenue_kopecks || 0));
         const url = String(r.tracking_url || '').trim();
         const head = `
-            <button type="button" class="promo-row${expanded ? ' promo-row--open' : ''}" data-action="promo-src-toggle" data-code="${esc(code)}">
-                <span class="promo-row__title">${esc(String(r.title || code))}</span>
-                <span class="promo-row__metrics">Переходы: ${formatNum(Number(r.clicks_count || 0))} · Оплат: ${formatNum(paidN)} · ${esc(rev)}</span>
-                <span class="promo-code-chip mono">${esc(code)}</span>
+            <button type="button" class="promo-row promo-row--src${expanded ? ' promo-row--open' : ''}"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                data-action="promo-src-toggle"
+                data-code="${esc(code)}">
+                <span class="promo-row__title promo-row__title--src">${esc(String(r.title || code))}</span>
+                <span class="promo-row__metrics promo-row__metrics--src">Переходы: ${formatNum(listClicks)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}</span>
+                <span class="promo-code-chip mono promo-code-chip--src">${esc(code)}</span>
             </button>`;
         if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
         const fullUrl = url || (d && String(d.tracking_url || '').trim()) || '';
-        const detailBlock = `
-            <div class="promo-row-detail">
-                <p class="promo-muted">Уникальных пользователей: ${formatNum(Number((d || r).unique_users_count ?? r.unique_users_count ?? 0))}</p>
-                <p class="promo-muted">Создано заказов: ${formatNum(Number(d?.created_orders_count ?? 0))}</p>
-                <p class="promo-muted">Оплаченных заказов: ${formatNum(Number((d || r).paid_orders_count ?? r.paid_orders_count ?? 0))}</p>
-                <p class="promo-muted">Сумма оплат: ${esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0))}</p>
-                <p class="promo-muted">Создан: ${esc(String((d || r).created_at || '').replace('T', ' ').slice(0, 19))}</p>
-                ${fullUrl
-            ? `
-                <div class="promo-link-block">
-                  <button type="button" class="promo-cta promo-cta--inline" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
-                  <p class="promo-muted mono promo-link-fallback">${esc(fullUrl)}</p>
-                  <p class="promo-hint-small">Если копирование недоступно — выделите и скопируйте ссылку вручную.</p>
+        const clicksN = Number((d || r).clicks_count ?? listClicks ?? 0);
+        const paidDetail = Number((d || r).paid_orders_count ?? listPaid ?? 0);
+        const createdN = Number(d?.created_orders_count ?? 0);
+        const sumStr = esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0));
+        const row = (label, val) =>
+            `<div class="promo-src-metric-row"><span class="promo-src-metric-row__label">${label}:</span><span class="promo-src-metric-row__val">${formatNum(Number(val ?? 0))}</span></div>`;
+        const rowRub = `<div class="promo-src-metric-row"><span class="promo-src-metric-row__label">Сумма оплат:</span><span class="promo-src-metric-row__val">${sumStr}</span></div>`;
+        const detailMetrics = `
+            <div class="promo-src-metric-rows" role="group" aria-label="Метрики источника">
+                ${row('Переходы', clicksN)}
+                ${row('Создано заказов', createdN)}
+                ${row('Оплаченных заказов', paidDetail)}
+                ${rowRub}
+            </div>`;
+        const copyBlock = fullUrl
+            ? `<div class="promo-src-copy">
+                  <button type="button" class="promo-cta promo-cta--src-copy" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
                 </div>`
-            : '<p class="promo-muted">Ссылка будет доступна после настройки username бота.</p>'}
+            : `<p class="promo-muted promo-muted--src-foot">Ссылка будет доступна после настройки username бота.</p>`;
+        const detailBlock = `
+            <div class="promo-row-detail promo-row-detail--src">
+                ${detailMetrics}
+                ${copyBlock}
             </div>`;
         return `<div class="promo-row-wrap">${head}${detailBlock}</div>`;
     }
@@ -3468,7 +3480,7 @@ async function handleAction(action, value, eventTarget) {
         state.promoFlash = ok ? 'Ссылка скопирована.' : '';
         await renderApp();
         if (!ok && url) {
-            window.alert('Автокопирование недоступно. Ссылка показана в карточке — скопируйте её вручную.');
+            window.alert('Копирование в буфер недоступно в этом браузере или контексте (обычно нужен HTTPS).');
         }
         return;
     }
