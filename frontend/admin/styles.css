@@ -1898,25 +1898,20 @@ button.dashboard-v2__dash-row {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-2);
+}
+
+.promo-alerts:empty {
+    display: none;
+    margin-bottom: 0;
 }
 
 .promo-banner-msg {
     margin: 0;
 }
 
-.promo-lead {
-    margin: 0 0 var(--space-4);
-    padding: 0 var(--space-1);
-    font-size: 13px;
-    line-height: 1.45;
-    font-weight: 500;
-    color: var(--text-soft);
-    letter-spacing: -0.01em;
-}
-
 .promo-section-card {
-    margin-bottom: var(--space-4);
+    margin-bottom: var(--space-3);
     border-radius: var(--radius-lg);
     background: var(--surface-1);
     border: 1px solid var(--line-strong);
@@ -1925,13 +1920,13 @@ button.dashboard-v2__dash-row {
 }
 
 .promo-section-card__header {
-    padding: var(--space-4) var(--space-4) var(--space-3);
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--line);
     background: linear-gradient(180deg, rgba(255, 254, 251, 1) 0%, rgba(247, 245, 240, 0.35) 100%);
 }
 
 .promo-section-card__title {
-    margin: 0 0 var(--space-1);
+    margin: 0 0 var(--space-2);
     font-size: var(--font-title);
     font-weight: 780;
     letter-spacing: -0.02em;
@@ -1939,15 +1934,8 @@ button.dashboard-v2__dash-row {
     line-height: 1.25;
 }
 
-.promo-section-card__desc {
-    margin: 0 0 var(--space-3);
-    font-size: 13px;
-    line-height: 1.4;
-    color: var(--text-soft);
-}
-
 .promo-section-card__body {
-    padding: var(--space-3) var(--space-4) var(--space-4);
+    padding: var(--space-3) var(--space-4);
 }
 
 /* Primary CTA — в духе dashboard chips / brand */

@@ -1502,12 +1502,10 @@ async function renderPromoScreen() {
     return `
         <div class="dashboard-v2 promo-screen promo-screen--v2 screen-enter">
             <div class="promo-alerts">${notice}${botWarn}${loadBlock}</div>
-            <p class="promo-lead">Отслеживаемые ссылки и кампании с откликами по ключевому слову в одном экране.</p>
 
             <section class="promo-section-card" aria-labelledby="promo-sources-heading">
               <header class="promo-section-card__header">
                 <h2 id="promo-sources-heading" class="promo-section-card__title">Источники</h2>
-                <p class="promo-section-card__desc">Ссылки вида <span class="mono">t.me/… ?start=src_…</span> и атрибуция заказов.</p>
                 <button type="button" class="promo-cta" data-action="promo-open-source-form"><span class="promo-cta__plus" aria-hidden="true">+</span>Создать источник</button>
               </header>
               <div class="promo-section-card__body">
@@ -1520,7 +1518,6 @@ async function renderPromoScreen() {
             <section class="promo-section-card" aria-labelledby="promo-bc-heading">
               <header class="promo-section-card__header">
                 <h2 id="promo-bc-heading" class="promo-section-card__title">Рассылки</h2>
-                <p class="promo-section-card__desc">Карточка кампании и подсчёт откликов, когда пользователь пишет боту кодовое слово.</p>
                 <button type="button" class="promo-cta" data-action="promo-open-broadcast-form"><span class="promo-cta__plus" aria-hidden="true">+</span>Создать рассылку</button>
               </header>
               <div class="promo-section-card__body">
