@@ -246,6 +246,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 (SELECT COUNT(*) FROM promotion_source_clicks c WHERE c.source_id = s.id) AS clicks_count,
                 (SELECT COUNT(DISTINCT telegram_id) FROM promotion_source_clicks c WHERE c.source_id = s.id) AS unique_users_count
              FROM promotion_sources s
+             WHERE COALESCE(s.is_active, 1) = 1
              ORDER BY s.created_at DESC`
         );
         const revExpr = sqlOrderPaidRevenueKopecks('o');
@@ -287,7 +288,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     async function getSourceDetail(code) {
         const c = safeTrackingCode(code);
         if (!c) return null;
-        const s = await dbGet(db, 'SELECT * FROM promotion_sources WHERE code = ?', [c]);
+        const s = await dbGet(
+            db,
+            'SELECT * FROM promotion_sources WHERE code = ? AND COALESCE(is_active, 1) = 1',
+            [c]
+        );
         if (!s) return null;
 
         const clicks = await dbGet(
@@ -353,6 +358,32 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             /* ok */
         }
         return { code, title: t, created_at: now, tracking_url };
+    }
+
+    /**
+     * Скрывает источник из админки (soft delete через is_active=0).
+     * Клики и заказы с source_code остаются в БД; новые переходы по ссылке не пишутся.
+     */
+    async function deactivateSource(codeRaw) {
+        const c = safeTrackingCode(codeRaw);
+        if (!c) {
+            const err = new Error('NOT_FOUND');
+            err.code = 'NOT_FOUND';
+            throw err;
+        }
+        const row = await dbGet(
+            db,
+            'SELECT id, COALESCE(is_active, 1) AS a FROM promotion_sources WHERE code = ?',
+            [c]
+        );
+        if (!row) {
+            const err = new Error('NOT_FOUND');
+            err.code = 'NOT_FOUND';
+            throw err;
+        }
+        if (Number(row.a) === 0) return { code: c };
+        await dbRun(db, `UPDATE promotion_sources SET is_active = 0 WHERE code = ? AND COALESCE(is_active, 1) = 1`, [c]);
+        return { code: c };
     }
 
     async function listBroadcasts(limit = 30) {
@@ -473,6 +504,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         listSources,
         getSourceDetail,
         createSource,
+        deactivateSource,
         listBroadcasts,
         getBroadcast,
         createBroadcast,

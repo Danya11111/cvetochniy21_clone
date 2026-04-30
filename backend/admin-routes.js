@@ -350,6 +350,29 @@ function createAdminRouter({
             }
         );
 
+        router.delete(
+            '/promotion/sources/:code',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const out = await promotionService.deactivateSource(req.params.code);
+                    await adminRepository.logAction({
+                        adminId: req.admin.adminId,
+                        action: 'PROMOTION_SOURCE_DELETE',
+                        entityType: 'promotion_source',
+                        entityId: String(out.code || ''),
+                        details: {}
+                    });
+                    res.json({ ok: true, data: out });
+                } catch (e) {
+                    const c = String(e.code || '');
+                    if (c === 'NOT_FOUND') return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+                    console.error('[Admin] promotion source delete failed:', e.message || e);
+                    res.status(500).json({ ok: false, error: 'PROMOTION_SOURCE_DELETE_FAILED' });
+                }
+            }
+        );
+
         router.get(
             '/promotion/broadcasts',
             auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),

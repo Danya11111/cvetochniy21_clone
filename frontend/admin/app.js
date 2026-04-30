@@ -664,6 +664,8 @@ function friendlyActionError(message) {
     if (text.includes('HTTP_401') || text.includes('HTTP_403')) return 'Недостаточно прав для этого действия.';
     if (text.includes('HTTP_5')) return 'Сервис временно недоступен. Повторите через минуту.';
     if (text.includes('KEYWORD_DUPLICATE')) return 'Такое кодовое слово уже используется. Выберите другое.';
+    if (text.includes('PROMOTION_SOURCE_DELETE_FAILED'))
+        return 'Не удалось удалить источник. Попробуйте позже.';
     if (text.includes('TELEGRAM_BOT_USERNAME_REQUIRED')) return 'Не задан username бота для ссылок. Укажите TELEGRAM_BOT_USERNAME в настройках сервера.';
     return 'Не удалось выполнить действие. Попробуйте снова.';
 }
@@ -1364,25 +1366,36 @@ async function renderPromoScreen() {
         const paidDetail = Number((d || r).paid_orders_count ?? listPaid ?? 0);
         const createdN = Number(d?.created_orders_count ?? 0);
         const sumStr = esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0));
-        const row = (label, val) =>
-            `<div class="promo-src-metric-row"><span class="promo-src-metric-row__label">${label}:</span><span class="promo-src-metric-row__val">${formatNum(Number(val ?? 0))}</span></div>`;
-        const rowRub = `<div class="promo-src-metric-row"><span class="promo-src-metric-row__label">Сумма оплат:</span><span class="promo-src-metric-row__val">${sumStr}</span></div>`;
-        const detailMetrics = `
-            <div class="promo-src-metric-rows" role="group" aria-label="Метрики источника">
-                ${row('Переходы', clicksN)}
-                ${row('Создано заказов', createdN)}
-                ${row('Оплаченных заказов', paidDetail)}
-                ${rowRub}
+        const kvRow = (label, numHtml) =>
+            `<div class="promo-src-kv-row">
+                <span class="promo-src-kv-row__lab">${esc(label)}: </span>
+                <span class="promo-src-kv-row__lead" aria-hidden="true"></span>
+                <span class="promo-src-kv-row__val">${numHtml}</span>
             </div>`;
-        const copyBlock = fullUrl
-            ? `<div class="promo-src-copy">
-                  <button type="button" class="promo-cta promo-cta--src-copy" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>
-                </div>`
+        const kvRubRow = `<div class="promo-src-kv-row promo-src-kv-row--emph">
+                <span class="promo-src-kv-row__lab">Сумма оплат: </span>
+                <span class="promo-src-kv-row__lead" aria-hidden="true"></span>
+                <span class="promo-src-kv-row__val">${sumStr}</span>
+            </div>`;
+        const detailMetrics = `
+            <div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
+                ${kvRow('Переходы', formatNum(clicksN))}
+                ${kvRow('Создано заказов', formatNum(createdN))}
+                ${kvRow('Оплаченных заказов', formatNum(paidDetail))}
+                ${kvRubRow}
+            </div>`;
+        const noUrlFoot = fullUrl
+            ? ''
             : `<p class="promo-muted promo-muted--src-foot">Ссылка будет доступна после настройки username бота.</p>`;
+        const actionsHtml = `<div class="promo-src-actions${fullUrl ? '' : ' promo-src-actions--solo'}">
+                ${fullUrl ? `<button type="button" class="promo-src-btn promo-src-btn--secondary" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>` : ''}
+                <button type="button" class="promo-src-btn promo-src-btn--danger" data-action="promo-src-delete-prompt" data-code="${esc(code)}">Удалить</button>
+            </div>`;
         const detailBlock = `
             <div class="promo-row-detail promo-row-detail--src">
                 ${detailMetrics}
-                ${copyBlock}
+                ${noUrlFoot}
+                ${actionsHtml}
             </div>`;
         return `<div class="promo-row-wrap">${head}${detailBlock}</div>`;
     }
@@ -3431,6 +3444,40 @@ async function handleAction(action, value, eventTarget) {
     }
     if (action === 'promo-cancel-broadcast') {
         state.promoFormBroadcastOpen = false;
+        await renderApp();
+        return;
+    }
+    if (action === 'promo-src-delete-prompt') {
+        const code = String(value || '').trim();
+        if (!code) return;
+        openConfirmationSheet(
+            {
+                title: 'Удалить источник?',
+                message: 'Источник будет удалён из списка. Это действие нельзя отменить.',
+                impact_summary: '',
+                severity: 'destructive',
+                confirm_label: 'Удалить',
+                cancel_label: 'Отмена',
+                irreversible_warning: false
+            },
+            async () => {
+                await runGuardedAction(`promo-delete-${code}`, async () => {
+                    try {
+                        await api(`/api/admin/promotion/sources/${encodeURIComponent(code)}`, { method: 'DELETE' });
+                        state.promoSourcesList = (state.promoSourcesList || []).filter((s) => String(s.code || '') !== code);
+                        state.promoExpandedSources = Object.fromEntries(
+                            Object.entries(state.promoExpandedSources || {}).filter(([k]) => k !== code)
+                        );
+                        state.promoDetailByCode = Object.fromEntries(
+                            Object.entries(state.promoDetailByCode || {}).filter(([k]) => k !== code)
+                        );
+                        state.promoFlash = 'Источник удалён.';
+                    } catch (e) {
+                        window.alert(friendlyActionError(String((e && e.message) || '')) || 'Не удалось удалить источник.');
+                    }
+                });
+            }
+        );
         await renderApp();
         return;
     }
