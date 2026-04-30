@@ -68,7 +68,43 @@ async function main() {
             text: 'любой короткий текст'
         }
     });
-    assert.strictEqual(clientCalls.length, 0, 'keyword-handled=true must not call handleClientMessage');
+    assert.strictEqual(clientCalls.length, 1, 'keyword matched/recorded must still call handleClientMessage');
+    assert.strictEqual(clientCalls[0].message_id, 11);
+
+    clientCalls = [];
+    const promotionThrows = {
+        async handleKeywordReply() {
+            throw new Error('boom_keyword');
+        }
+    };
+    const { handleUpdate: hThrow } = createTelegramUpdateHandler({
+        supportService,
+        broadcastService,
+        telegramClient,
+        telegramAdminDashboard,
+        promotionService: promotionThrows,
+        runtimeFlagsService: {
+            async getAll() {
+                return { SUPPORT_RELAY_ENABLED: true };
+            }
+        },
+        config: baseCfg(),
+        logger: console
+    });
+    await hThrow({
+        update_id: 9005,
+        message: {
+            message_id: 55,
+            chat: { id: 9191, type: 'private' },
+            from: { id: 9191, is_bot: false },
+            text: 'hi'
+        }
+    });
+    assert.strictEqual(
+        clientCalls.length,
+        1,
+        'handleKeywordReply failure must still call handleClientMessage'
+    );
 
     const promotionNoKeyword = {
         async handleKeywordReply() {
@@ -158,7 +194,7 @@ async function main() {
     });
     assert.strictEqual(clientCalls.length, 1, 'without runtimeFlagsService, env SUPPORT_RELAY_ENABLED must relay');
 
-    process.stdout.write('PASS support relay private flow (keyword gate, runtime flag, long text)\n');
+    process.stdout.write('PASS support relay private flow (keyword + support, runtime flag, errors)\n');
 }
 
 main().catch((e) => {

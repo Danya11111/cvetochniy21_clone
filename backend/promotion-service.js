@@ -162,9 +162,10 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     }
 
     /**
-     * Если сообщение совпало с активным кодовым словом — пишет отклик в БД и возвращает true
-     * (чтобы downstream не отправлял текст в поддержку). Сообщения пользователю не отправляет.
-     * @returns {Promise<boolean>}
+     * Если сообщение совпало с активным кодовым словом — пишет отклик в БД (или фиксирует дубль) и возвращает true.
+     * Сообщения пользователю не отправляет. Webhook-хендлер всё равно передаёт то же сообщение в поддержку — return
+     * не означает «остановить relay».
+     * @returns {Promise<boolean>} true если отклик по ключу учтён (в т.ч. duplicate skip / race UNIQUE)
      */
     async function handleKeywordReply(_telegramClient, message, logger = console) {
         const chatType = String(message.chat?.type || '');

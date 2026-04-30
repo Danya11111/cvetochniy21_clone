@@ -391,30 +391,33 @@ function createTelegramUpdateHandler({
                 textLen: textProbe.length
             });
 
+            let promotionKeywordMatched = false;
             let promotionKeywordOutcome = 'skipped_probe';
             if (!promotionService?.handleKeywordReply) {
                 promotionKeywordOutcome = 'no_promo_service';
             } else if (!textProbe) {
                 promotionKeywordOutcome = 'no_text';
             } else if (textProbe.startsWith('/')) {
-                promotionKeywordOutcome = 'slash_skipped_elsewhere';
+                promotionKeywordOutcome = 'slash_commands_use_command_flow';
             } else if (textProbe.length > MAX_PROMOTION_KEYWORD_LEN) {
                 promotionKeywordOutcome = 'too_long_for_keyword_gate';
             } else {
                 try {
-                    const kwHandled = await promotionService.handleKeywordReply(telegramClient, message, logger);
-                    if (kwHandled) {
-                        logger.log('[SupportFlow] promotion_keyword_handled', { handled: true });
-                        return;
-                    }
-                    promotionKeywordOutcome = 'checked_not_matched';
+                    promotionKeywordMatched = await promotionService.handleKeywordReply(
+                        telegramClient,
+                        message,
+                        logger
+                    );
+                    promotionKeywordOutcome = promotionKeywordMatched
+                        ? 'matched_or_duplicate_recorded'
+                        : 'checked_not_matched';
                 } catch (e) {
                     logger.warn('[Promotion] keyword_reply_failed', { message: e?.message || String(e) });
                     promotionKeywordOutcome = 'promo_threw_continue_support';
                 }
             }
-            logger.log('[SupportFlow] promotion_keyword_handled', {
-                handled: false,
+            logger.log('[SupportFlow] promotion_keyword_checked', {
+                matched: promotionKeywordMatched,
                 reason: promotionKeywordOutcome
             });
 
