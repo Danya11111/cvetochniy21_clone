@@ -9,6 +9,7 @@ const { upsertTelegramUserFromMessage } = require('./telegram-user-profile-sync'
 const { runStartOnboarding, handleStartWelcomeConsentCallback } = require('./telegram-start-onboarding');
 const { resolveConsentCallbackContext } = require('./consent-callback-context');
 const { MANAGER_HELP_CALLBACK_DATA } = require('./manager-help-constants');
+const { MAX_PROMOTION_KEYWORD_LEN } = require('./promotion-service');
 const interactiveLatency = require('./telegram-interactive-metrics');
 
 function createTelegramUpdateHandler({
@@ -339,7 +340,12 @@ function createTelegramUpdateHandler({
 
         if (chatType === 'private') {
             const textProbe = message.text != null ? String(message.text).trim() : '';
-            if (promotionService?.handleKeywordReply && textProbe && !textProbe.startsWith('/')) {
+            if (
+                promotionService?.handleKeywordReply &&
+                textProbe &&
+                !textProbe.startsWith('/') &&
+                textProbe.length <= MAX_PROMOTION_KEYWORD_LEN
+            ) {
                 try {
                     const kwHandled = await promotionService.handleKeywordReply(telegramClient, message, logger);
                     if (kwHandled) return;

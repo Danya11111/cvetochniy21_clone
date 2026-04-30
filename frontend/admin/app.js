@@ -1561,9 +1561,8 @@ async function renderPromoScreen() {
         ? `
       <div class="promo-inline-form">
         <p class="promo-inline-form__label">Новая карточка рассылки</p>
-        <p class="promo-muted promo-muted--tight">После сохранения нажмите «Разместить рассылку» в списке — карточка уйдёт в тему рассылок Telegram и подключится привычный сценарий доставки. Отклики по кодовому слову в личке с ботом считаются автоматически.</p>
         <label class="promo-field">
-          Изображения (до ~600 KB каждое, необязательно, не более 10)
+          Изображения
           <input type="file" id="promoBcImg" accept="image/*" multiple />
         </label>
         <p id="promoBcImgHint" class="promo-muted promo-muted--tight" hidden></p>

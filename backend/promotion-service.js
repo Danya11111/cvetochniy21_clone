@@ -169,14 +169,15 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     async function handleKeywordReply(_telegramClient, message, logger = console) {
         const chatType = String(message.chat?.type || '');
         if (chatType !== 'private') return false;
-        const text = message.text != null ? String(message.text).trim() : '';
-        if (!text || text.startsWith('/') || text.length > MAX_KEYWORD_LEN + 20) return false;
+        const trimmed = message.text != null ? String(message.text).trim() : '';
+        /** Короткая цитата поддержки должна продолжать идти в support; ключ — не длиннее MAX_KEYWORD_LEN. */
+        if (!trimmed || trimmed.startsWith('/') || trimmed.length > MAX_KEYWORD_LEN) return false;
 
-        const kw = normalizeKeyword(text);
+        const kw = normalizeKeyword(trimmed);
         if (!kw || kw.length < 2) return false;
 
         /** Не перехватываем технические строки */
-        if (/^(start_welcome_consent|manager_help_request|adm:)/i.test(text)) return false;
+        if (/^(start_welcome_consent|manager_help_request|adm:)/i.test(trimmed)) return false;
 
         const row = await dbGet(
             db,
@@ -185,7 +186,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                AND LOWER(TRIM(COALESCE(placement_status, ''))) = 'placed'
                AND placed_at IS NOT NULL
                AND TRIM(COALESCE(placed_at, '')) != ''
-               AND keyword = ?
+               AND LOWER(TRIM(keyword)) = ?
              ORDER BY
                datetime(placed_at) DESC,
                datetime(COALESCE(created_at, '')) DESC,
@@ -194,6 +195,9 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             [kw]
         );
         if (!row) return false;
+
+        /** Не использовать slice-хвост сообщения чтобы не совпасть по префиксу с ключом до 64 символов — только полное сообщение после нормализации. */
+        if (normalizeKeyword(trimmed) !== normalizeKeyword(row.keyword)) return false;
 
         const tid = String(message.from?.id || '').trim();
         if (!tid) return false;
@@ -209,6 +213,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         const now = new Date().toISOString();
 
         if (existing) {
+            logger.log('[PromotionKeyword] duplicate_skip', { broadcastId: row.id, tid });
             return true;
         }
 
@@ -217,17 +222,19 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 db,
                 `INSERT INTO promotion_broadcast_responses (broadcast_id, keyword, telegram_id, username, full_name, message_text, responded_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [row.id, row.keyword, tid, username, fullName, text.slice(0, 512), now]
+                [row.id, row.keyword, tid, username, fullName, trimmed.slice(0, 512), now]
             );
         } catch (e) {
             const msg = String(e && e.message);
             if (msg.includes('UNIQUE') || msg.toLowerCase().includes('constraint')) {
+                logger.log('[PromotionKeyword] duplicate_race_skip', { broadcastId: row.id, tid });
                 return true;
             }
-            throw e;
+            logger.warn('[PromotionKeyword] insert_failed', { broadcastId: row.id, keyword: row.keyword, tid, message: msg });
+            return false;
         }
 
-        logger.log('[Promotion] keyword_response_recorded', { broadcastId: row.id, keyword: row.keyword, tid });
+        logger.log('[PromotionKeyword] matched', { broadcastId: row.id, keyword: row.keyword, tid });
         return true;
     }
 
@@ -641,5 +648,6 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
 
 module.exports = {
     createPromotionService,
-    START_PREFIX: 'src_'
+    START_PREFIX: 'src_',
+    MAX_PROMOTION_KEYWORD_LEN: MAX_KEYWORD_LEN
 };

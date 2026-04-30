@@ -2042,7 +2042,7 @@ button.dashboard-v2__dash-row {
 }
 
 .promo-inline-form__label {
-    margin: 0 0 var(--space-3);
+    margin: 0 0 var(--space-2);
     font-size: 12px;
     font-weight: 750;
     letter-spacing: 0.08em;
