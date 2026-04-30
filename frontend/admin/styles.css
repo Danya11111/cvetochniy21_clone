@@ -2436,6 +2436,24 @@ button.dashboard-v2__dash-row {
     flex: 0 0 auto;
 }
 
+.promo-bc-thumb-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+.promo-bc-thumb-badge {
+    position: absolute;
+    right: -3px;
+    bottom: -3px;
+    background: rgba(18, 22, 26, 0.86);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 650;
+    padding: 2px 5px;
+    border-radius: 8px;
+    line-height: 1.15;
+}
+
 .promo-bc-head__media .promo-bc-thumb {
     width: 52px;
     height: 52px;
@@ -2560,6 +2578,21 @@ button.dashboard-v2__dash-row {
 
 .promo-row-detail--bc {
     padding: var(--space-3) var(--space-4);
+}
+
+.promo-bc-img-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin: 0 0 var(--space-3);
+}
+
+.promo-bc-grid-cell {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    border-radius: 10px;
+    border: 1px solid var(--line);
 }
 
 .promo-bc-detail-meta {

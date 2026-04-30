@@ -11,6 +11,8 @@ const MAX_CODE_LEN = 64;
 const MAX_BROADCAST_BODY = 4096;
 const MAX_KEYWORD_LEN = 64;
 const MAX_BASE64_PAYLOAD = 700000;
+const MAX_BROADCAST_IMAGES = 10;
+const MAX_IMAGE_BYTES = 600 * 1024;
 
 /** @typedef {{ db: import('sqlite3').Database }} Deps */
 
@@ -179,8 +181,16 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         const row = await dbGet(
             db,
             `SELECT * FROM promotion_broadcasts
-             WHERE status = 'active' AND keyword = ?
-             ORDER BY id DESC LIMIT 1`,
+             WHERE status = 'active'
+               AND LOWER(TRIM(COALESCE(placement_status, ''))) = 'placed'
+               AND placed_at IS NOT NULL
+               AND TRIM(COALESCE(placed_at, '')) != ''
+               AND keyword = ?
+             ORDER BY
+               datetime(placed_at) DESC,
+               datetime(COALESCE(created_at, '')) DESC,
+               id DESC
+             LIMIT 1`,
             [kw]
         );
         if (!row) return false;
@@ -373,11 +383,23 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         return dbAll(
             db,
             `SELECT b.*,
-                (SELECT COUNT(*) FROM promotion_broadcast_responses r WHERE r.broadcast_id = b.id) AS response_count
+                (SELECT COUNT(*) FROM promotion_broadcast_responses r WHERE r.broadcast_id = b.id) AS response_count,
+                (SELECT COUNT(*) FROM promotion_broadcast_images i WHERE i.broadcast_id = b.id) AS gallery_image_count
              FROM promotion_broadcasts b
              ORDER BY b.created_at DESC
              LIMIT ?`,
             [lim]
+        );
+    }
+
+    async function listBroadcastGalleryRows(broadcastId) {
+        return dbAll(
+            db,
+            `SELECT id, storage_path, original_name, mime_type, sort_order
+             FROM promotion_broadcast_images
+             WHERE broadcast_id = ?
+             ORDER BY sort_order ASC, id ASC`,
+            [Number(broadcastId)]
         );
     }
 
@@ -389,7 +411,60 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             'SELECT COUNT(*) AS c FROM promotion_broadcast_responses WHERE broadcast_id = ?',
             [row.id]
         );
-        return { ...row, response_count: Number(cnt?.c || 0) };
+        const gallery = await listBroadcastGalleryRows(row.id);
+        const images = [];
+        for (const im of gallery) {
+            images.push({
+                id: im.id,
+                sort_order: im.sort_order,
+                original_name: im.original_name,
+                mime_type: im.mime_type,
+                local_image_url: `/api/admin/promotion/broadcasts/${row.id}/image/${im.id}`
+            });
+        }
+        if (!gallery.length && row.image_storage_path) {
+            images.push({
+                id: null,
+                legacy: true,
+                sort_order: 0,
+                original_name: null,
+                mime_type: null,
+                local_image_url: `/api/admin/promotion/broadcasts/${row.id}/image`
+            });
+        }
+        const galleryCount = gallery.length;
+        return {
+            ...row,
+            response_count: Number(cnt?.c || 0),
+            gallery_image_count: galleryCount,
+            images
+        };
+    }
+
+    async function getBroadcastGalleryImageRow(broadcastId, imageRowId) {
+        return dbGet(
+            db,
+            'SELECT * FROM promotion_broadcast_images WHERE broadcast_id = ? AND id = ?',
+            [Number(broadcastId), Number(imageRowId)]
+        );
+    }
+
+    /** Список локальных файлов для размещения в тему (абсолютные пути). */
+    async function getBroadcastImagePathsForPlacement(broadcastId) {
+        const gallery = await listBroadcastGalleryRows(broadcastId);
+        const out = [];
+        for (const im of gallery) {
+            const fp = resolveImageFullPath(im.storage_path);
+            if (fp && fs.existsSync(fp)) out.push(fp);
+        }
+        if (!out.length) {
+            const row = await dbGet(db, 'SELECT image_storage_path FROM promotion_broadcasts WHERE id = ?', [
+                Number(broadcastId)
+            ]);
+            const fp = row && row.image_storage_path ? resolveImageFullPath(row.image_storage_path) : null;
+            if (fp && fs.existsSync(fp)) out.push(fp);
+        }
+        return out;
     }
 
     function saveImageBase64(dataUrlOrB64) {
@@ -408,7 +483,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             b64 = m[2];
         }
         const buf = Buffer.from(b64, 'base64');
-        if (buf.length > 600 * 1024) {
+        if (buf.length > MAX_IMAGE_BYTES) {
             const e = new Error('IMAGE_TOO_LARGE');
             e.code = 'IMAGE_TOO_LARGE';
             throw e;
@@ -426,7 +501,22 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         return rel.replace(/\\/g, '/');
     }
 
-    async function createBroadcast({ title, bodyText, keyword, imageUrl, imageBase64, createdByTgId }) {
+    function collectImageBase64Payloads(imageBase64, imagesBase64) {
+        const out = [];
+        if (Array.isArray(imagesBase64)) {
+            for (const x of imagesBase64) {
+                const s = String(x || '').trim();
+                if (s) out.push(s);
+            }
+        }
+        if (imageBase64) {
+            const s = String(imageBase64 || '').trim();
+            if (s) out.push(s);
+        }
+        return out.slice(0, MAX_BROADCAST_IMAGES);
+    }
+
+    async function createBroadcast({ title, bodyText, keyword, imageUrl, imageBase64, imagesBase64, createdByTgId }) {
         const body = String(bodyText || '').trim().slice(0, MAX_BROADCAST_BODY);
         if (!body) {
             const e = new Error('BODY_REQUIRED');
@@ -440,20 +530,23 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             throw e;
         }
 
-        const dup = await dbGet(db, 'SELECT id FROM promotion_broadcasts WHERE keyword = ?', [kw]);
-        if (dup) {
-            const e = new Error('KEYWORD_DUPLICATE');
-            e.code = 'KEYWORD_DUPLICATE';
-            throw e;
-        }
+        const imagePayloads = collectImageBase64Payloads(imageBase64, imagesBase64);
 
         let image_storage_path = null;
         let image_url = imageUrl != null ? String(imageUrl).trim().slice(0, 2000) : '';
-        if (!image_url && imageBase64) {
-            image_storage_path = saveImageBase64(imageBase64);
-        } else if (image_url) {
-            /* внешний URL */
+        const savedRows = [];
+        if (!image_url) {
+            for (let i = 0; i < imagePayloads.length; i++) {
+                const rel = saveImageBase64(imagePayloads[i]);
+                if (rel) {
+                    if (!image_storage_path) image_storage_path = rel;
+                    savedRows.push({ rel, sort: i });
+                }
+            }
         } else {
+            /* внешний URL — одна картинка через legacy-поле */
+        }
+        if (!image_url && !image_storage_path) {
             image_url = null;
         }
 
@@ -467,7 +560,22 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
              VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
             [ttl || null, body, image_url || null, image_storage_path, kw, now, cid]
         );
-        return { id: r.lastID, keyword: kw, created_at: now, placement_status: 'draft' };
+        const lastId = Number(r.lastID);
+        for (const sr of savedRows) {
+            await dbRun(
+                db,
+                `INSERT INTO promotion_broadcast_images (broadcast_id, storage_path, original_name, mime_type, size_bytes, sort_order, created_at)
+                 VALUES (?, ?, NULL, NULL, NULL, ?, ?)`,
+                [lastId, sr.rel, sr.sort, now]
+            );
+        }
+        return {
+            id: lastId,
+            keyword: kw,
+            created_at: now,
+            placement_status: 'draft',
+            image_count: savedRows.length || (image_url ? 1 : 0)
+        };
     }
 
     async function setPromotionBroadcastPlaced(rowId, payload) {
@@ -525,7 +633,9 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         createBroadcast,
         resolveImageFullPath,
         setPromotionBroadcastPlaced,
-        setPromotionBroadcastPlaceFailed
+        setPromotionBroadcastPlaceFailed,
+        getBroadcastImagePathsForPlacement,
+        getBroadcastGalleryImageRow
     };
 }
 

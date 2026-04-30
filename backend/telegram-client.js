@@ -513,6 +513,160 @@ function createTelegramClient({
         }
     }
 
+    /**
+     * sendMediaGroup: несколько локальных файлов-фото, подпись только у первого (caption).
+     * @param {{ chatId: number|string, filePaths: string[], caption?: string, messageThreadId?: number }} opts
+     * @returns {Promise<TgResult & { firstMessageId?: number }>}
+     */
+    async function sendMediaGroupFromFiles({ chatId, filePaths, caption, messageThreadId }) {
+        const pathsInput = Array.isArray(filePaths) ? filePaths.map((p) => String(p || '').trim()).filter(Boolean) : [];
+        if (!hasToken) {
+            const r = { ok: false, errorCode: 'NO_TOKEN', message: 'TELEGRAM_BOT_TOKEN is empty' };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+        if (!outboundHttpEnabled) {
+            const r = { ok: true, data: [] };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+        if (!httpClient) {
+            logger.error('[TelegramClient] outbound enabled but http client missing');
+            const r = {
+                ok: false,
+                errorCode: 'NO_HTTP_CLIENT',
+                message: 'Telegram Bot API http transport is not configured'
+            };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+        if (pathsInput.length < 2) {
+            const r = {
+                ok: false,
+                errorCode: 'BAD_REQUEST',
+                message: 'sendMediaGroupFromFiles: need at least 2 photos'
+            };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+        if (pathsInput.length > 10) {
+            const r = {
+                ok: false,
+                errorCode: 'BAD_REQUEST',
+                message: 'sendMediaGroupFromFiles: max 10 items'
+            };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+
+        const absPaths = pathsInput.map((p) => path.resolve(p)).filter((p) => p && fs.existsSync(p));
+        if (absPaths.length !== pathsInput.length) {
+            const r = {
+                ok: false,
+                errorCode: 'FILE_NOT_FOUND',
+                message: 'sendMediaGroupFromFiles: one or more local files missing'
+            };
+            recordOutboundApi('sendMediaGroupFromFiles', r);
+            return r;
+        }
+
+        const mediaArr = [];
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        const tid = normalizeMessageThreadId(messageThreadId);
+        if (tid !== undefined) form.append('message_thread_id', String(tid));
+
+        for (let i = 0; i < absPaths.length; i++) {
+            const abs = absPaths[i];
+            const field = `p${i}`;
+            const ct = guessImageContentType(abs);
+            const base = path.basename(abs) || 'photo.jpg';
+            form.append(field, fs.createReadStream(abs), {
+                filename: base,
+                contentType: ct
+            });
+            const entry = {
+                type: 'photo',
+                media: `attach://${field}`
+            };
+            if (i === 0 && caption != null && String(caption).trim()) {
+                entry.caption = String(caption).trim();
+            }
+            mediaArr.push(entry);
+        }
+        form.append('media', JSON.stringify(mediaArr));
+
+        const apiUrl = `https://api.telegram.org/bot${botToken}/sendMediaGroup`;
+        try {
+            const resp = await httpClient.post(apiUrl, form, {
+                headers: form.getHeaders(),
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity
+            });
+            if (!resp.data?.ok) {
+                const description = String(resp.data?.description || 'TG_API_ERROR');
+                const errorCode = classifyTelegramDescription(description);
+                const r = {
+                    ok: false,
+                    errorCode,
+                    message: description,
+                    retryAfterSec: Number(resp.data?.parameters?.retry_after || 0) || undefined,
+                    data: resp.data || null
+                };
+                recordOutboundApi('sendMediaGroupFromFiles', r);
+                return r;
+            }
+            const resultArr = resp.data?.result || [];
+            const firstMid =
+                Array.isArray(resultArr) &&
+                resultArr[0] &&
+                Number(resultArr[0].message_id) > 0
+                    ? Number(resultArr[0].message_id)
+                    : 0;
+            if (Array.isArray(resultArr)) {
+                for (const msg of resultArr) {
+                    if (msg && !(Number(msg.message_id) > 0)) {
+                        logger.warn('[TelegramClient] sendMediaGroupFromFiles: invalid message id in bundle', {});
+                    }
+                }
+            }
+            const okRes = { ok: true, data: resultArr, firstMessageId: firstMid };
+            recordOutboundApi('sendMediaGroupFromFiles', okRes);
+            try {
+                logger.log?.('[TelegramTransport] health_update', {
+                    method: 'sendMediaGroupFromFiles',
+                    ok: true,
+                    consecutiveTransportErrors: transportHealth.getTelegramTransportHealthSnapshot({
+                        outboundEnabled: true,
+                        httpClientPresent: true,
+                        proxyConfigured: !!proxyEndpointForLogs,
+                        transportMode
+                    }).consecutiveTransportErrors
+                });
+            } catch (_) {
+                /**/
+            }
+            return okRes;
+        } catch (e) {
+            const normalized = normalizeTelegramError(e);
+            if (isLikelyProxyOrTunnelError(e)) {
+                logger.warn('[TelegramClient] sendMediaGroupFromFiles network/proxy error', {
+                    telegramTransportMode: transportMode,
+                    errorCode: normalized.errorCode,
+                    syscall: e.code || null
+                });
+            } else {
+                logger.warn('[TelegramClient] sendMediaGroupFromFiles request failed', {
+                    telegramTransportMode: transportMode,
+                    errorCode: normalized.errorCode,
+                    message: normalized.message
+                });
+            }
+            recordOutboundApi('sendMediaGroupFromFiles', normalized);
+            return normalized;
+        }
+    }
+
     /** @returns {Promise<TgResult>} */
     async function pinChatMessage({ chatId, messageId, disableNotification = true }) {
         return request('pinChatMessage', {
@@ -568,6 +722,7 @@ function createTelegramClient({
         editMessageText,
         sendPhoto,
         sendPhotoFromFile,
+        sendMediaGroupFromFiles,
         sendDocument,
         sendDocumentFromFile,
         pinChatMessage,

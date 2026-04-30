@@ -286,12 +286,33 @@ db.serialize(() => {
             body_text TEXT NOT NULL,
             image_url TEXT,
             image_storage_path TEXT,
-            keyword TEXT NOT NULL UNIQUE,
+            keyword TEXT NOT NULL,
             status TEXT DEFAULT 'active',
             created_at TEXT,
             created_by_telegram_id TEXT
         )
     `);
+    db.run(
+        'CREATE INDEX IF NOT EXISTS idx_promotion_broadcasts_keyword ON promotion_broadcasts(keyword)'
+    );
+    db.run(`
+        CREATE TABLE IF NOT EXISTS promotion_broadcast_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            broadcast_id INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            original_name TEXT,
+            mime_type TEXT,
+            size_bytes INTEGER,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT
+        )
+    `);
+    db.run(
+        'CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_images_bc ON promotion_broadcast_images(broadcast_id)'
+    );
+    db.run(
+        'CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_images_sort ON promotion_broadcast_images(broadcast_id, sort_order)'
+    );
     db.run(`
         CREATE TABLE IF NOT EXISTS promotion_broadcast_responses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,6 +359,113 @@ db.serialize(() => {
         runAllMigrationsAsync();
     });
 });
+
+/**
+ * Убираем UNIQUE по keyword у promotion_broadcasts (повтор ключевых слов в новых карточках).
+ * @param {import('sqlite3').Database} db
+ * @param {Console} log
+ */
+async function migratePromotionBroadcastsDropKeywordUnique(db, log) {
+    const all = (sql, params = []) =>
+        new Promise((resolve, reject) => {
+            db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+        });
+    const run = (sql, params = []) =>
+        new Promise((resolve, reject) => {
+            db.run(sql, params, (err) => (err ? reject(err) : resolve()));
+        });
+    let needs = false;
+    const indexes = await all(`PRAGMA index_list('promotion_broadcasts')`);
+    for (const ix of indexes) {
+        if (!Number(ix.unique)) continue;
+        const name = String(ix.name || '');
+        const parts = await all(`PRAGMA index_info("${name.replace(/"/g, '""')}")`);
+        const cols = parts.map((p) => p.name).filter(Boolean);
+        if (cols.length === 1 && cols[0] === 'keyword') {
+            needs = true;
+            break;
+        }
+    }
+    if (!needs) return;
+    log.log('[DBMigration] promotion_broadcasts_rebuild_keyword_nonunique', { phase: 'start' });
+    await run('BEGIN IMMEDIATE');
+    try {
+        await run(`CREATE TABLE promotion_broadcasts__kwfix (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            body_text TEXT NOT NULL,
+            image_url TEXT,
+            image_storage_path TEXT,
+            keyword TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            created_at TEXT,
+            created_by_telegram_id TEXT,
+            placement_status TEXT DEFAULT 'draft',
+            placed_at TEXT,
+            placed_message_id INTEGER,
+            placed_chat_id TEXT,
+            placed_thread_id INTEGER,
+            placed_campaign_id INTEGER,
+            place_error TEXT
+        )`);
+        await run(
+            `INSERT INTO promotion_broadcasts__kwfix (
+                id, title, body_text, image_url, image_storage_path, keyword, status, created_at, created_by_telegram_id,
+                placement_status, placed_at, placed_message_id, placed_chat_id, placed_thread_id, placed_campaign_id, place_error
+            ) SELECT
+                id, title, body_text, image_url, image_storage_path, keyword, status, created_at, created_by_telegram_id,
+                COALESCE(placement_status, 'draft'), placed_at, placed_message_id, placed_chat_id, placed_thread_id, placed_campaign_id, place_error
+            FROM promotion_broadcasts`
+        );
+        await run('DROP TABLE promotion_broadcasts');
+        await run('ALTER TABLE promotion_broadcasts__kwfix RENAME TO promotion_broadcasts');
+        await run('CREATE INDEX IF NOT EXISTS idx_promotion_broadcasts_keyword ON promotion_broadcasts(keyword)');
+        await run('COMMIT');
+        log.log('[DBMigration] promotion_broadcasts_rebuild_keyword_nonunique', { ok: true });
+    } catch (e) {
+        try {
+            await run('ROLLBACK');
+        } catch (_) {
+            /* ignore */
+        }
+        throw e;
+    }
+}
+
+/**
+ * @param {import('sqlite3').Database} db
+ * @param {Console} log
+ */
+async function ensurePromotionBroadcastImagesTableExists(db, log) {
+    await new Promise((resolve, reject) => {
+        db.run(
+            `CREATE TABLE IF NOT EXISTS promotion_broadcast_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broadcast_id INTEGER NOT NULL,
+                storage_path TEXT NOT NULL,
+                original_name TEXT,
+                mime_type TEXT,
+                size_bytes INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT
+            )`,
+            (err) => (err ? reject(err) : resolve())
+        );
+    });
+    await new Promise((resolve, reject) => {
+        db.run(
+            'CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_images_bc ON promotion_broadcast_images(broadcast_id)',
+            (err) => (err ? reject(err) : resolve())
+        );
+    });
+    await new Promise((resolve, reject) => {
+        db.run(
+            'CREATE INDEX IF NOT EXISTS idx_promotion_broadcast_images_sort ON promotion_broadcast_images(broadcast_id, sort_order)',
+            (err) => (err ? reject(err) : resolve())
+        );
+    });
+    log.log('[DBMigration] promotion_broadcast_images_checked', { ok: true });
+}
 
 async function runAllMigrationsAsync() {
     try {
@@ -420,6 +548,9 @@ async function runAllMigrationsAsync() {
                 (err) => (err ? reject(err) : resolve())
             );
         });
+
+        await migratePromotionBroadcastsDropKeywordUnique(db, console);
+        await ensurePromotionBroadcastImagesTableExists(db, console);
 
         // products
         await ensureColumn('products', 'category', 'TEXT');

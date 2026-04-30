@@ -262,21 +262,40 @@ function createAdminRouter({
 
     function enrichBroadcastApiRow(row, { withLocalImage = false } = {}) {
         if (!row) return row;
+        const gc = Number(row.gallery_image_count || 0);
+        const legacyPath = String(row.image_storage_path || '').trim();
+        const extWeb = String(row.image_url || '').trim();
+        const hasLocalBlob = !!(gc > 0 || legacyPath);
+        /** У новых записей первый файл дублируется в image_storage_path — счётчик идёт по галерее. */
+        const imageTotal =
+            gc > 0 ? gc : legacyPath ? 1 : extWeb ? 1 : 0;
+
         const out = {
             ...row,
             text: row.body_text,
-            response_count: row.response_count != null ? Number(row.response_count) : undefined
+            response_count: row.response_count != null ? Number(row.response_count) : undefined,
+            image_count_total: imageTotal,
+            extra_images_count: imageTotal > 1 ? imageTotal - 1 : 0
         };
+
         delete out.body_text;
-        if (!withLocalImage && row.image_storage_path) {
-            out.has_uploaded_image = true;
+
+        /* Не отправлять сырыми пути в JSON — только URL при детали. */
+        if (!withLocalImage) {
+            if (hasLocalBlob || extWeb) {
+                out.has_uploaded_image = hasLocalBlob;
+                out.has_external_image = !!extWeb;
+            }
+            delete out.gallery_image_count;
             delete out.image_storage_path;
-        }
-        if (withLocalImage && row.image_storage_path) {
-            const id = Number(row.id || 0);
-            if (id > 0) out.local_image_url = `/api/admin/promotion/broadcasts/${id}/image`;
+        } else {
+            delete out.gallery_image_count;
+            const idNum = Number(row.id || 0);
+            if (idNum > 0 && hasLocalBlob) out.local_image_url = `/api/admin/promotion/broadcasts/${idNum}/image`;
             delete out.image_storage_path;
+            if (Array.isArray(row.images)) out.images = row.images;
         }
+
         return out;
     }
 
@@ -405,6 +424,7 @@ function createAdminRouter({
                         keyword: body.keyword,
                         imageUrl: undefined,
                         imageBase64: body.image_base64,
+                        imagesBase64: Array.isArray(body.images_base64) ? body.images_base64 : null,
                         createdByTgId: req.admin.telegramId
                     });
                     await adminRepository.logAction({
@@ -412,16 +432,13 @@ function createAdminRouter({
                         action: 'PROMOTION_BROADCAST_CREATE',
                         entityType: 'promotion_broadcast',
                         entityId: String(created.id),
-                        details: { keyword: created.keyword }
+                        details: { keyword: created.keyword, image_count: created.image_count }
                     });
                     res.json({ ok: true, data: created });
                 } catch (e) {
                     const c = String(e.code || '');
                     if (c === 'BODY_REQUIRED' || c === 'KEYWORD_REQUIRED') {
                         return res.status(400).json({ ok: false, error: c });
-                    }
-                    if (c === 'KEYWORD_DUPLICATE') {
-                        return res.status(409).json({ ok: false, error: c, message: 'Такое кодовое слово уже занято.' });
                     }
                     if (c === 'IMAGE_TOO_LARGE' || c === 'IMAGE_INVALID') {
                         return res.status(400).json({ ok: false, error: c });
@@ -497,17 +514,39 @@ function createAdminRouter({
                     const caption = buildPromotionTopicMessageText(row.body_text, { forPhotoCaption: true });
                     const textOnly = buildPromotionTopicMessageText(row.body_text, { forPhotoCaption: false });
 
+                    const absPaths =
+                        typeof promotionService.getBroadcastImagePathsForPlacement === 'function'
+                            ? await promotionService.getBroadcastImagePathsForPlacement(id)
+                            : [];
+
+                    const gw = Number(row.gallery_image_count || 0);
+                    const legRel = !!(row.image_storage_path && String(row.image_storage_path).trim());
+                    if ((gw > 0 || legRel) && absPaths.length === 0) {
+                        await promotionService.setPromotionBroadcastPlaceFailed(id, 'LOCAL_IMAGE_MISSING');
+                        return res.status(500).json({ ok: false, error: 'LOCAL_IMAGE_MISSING' });
+                    }
+
+                    /** @type {any} */
                     let sent = null;
-                    if (row.image_storage_path) {
-                        const fullPath = promotionService.resolveImageFullPath(row.image_storage_path);
-                        if (!fullPath || !fs.existsSync(fullPath)) {
-                            await promotionService.setPromotionBroadcastPlaceFailed(id, 'LOCAL_IMAGE_MISSING');
-                            return res.status(500).json({ ok: false, error: 'LOCAL_IMAGE_MISSING' });
-                        }
+                    if (absPaths.length >= 2 && typeof telegramClient.sendMediaGroupFromFiles === 'function') {
+                        sent = await telegramClient.sendMediaGroupFromFiles({
+                            chatId: bcChat,
+                            messageThreadId: bcThread,
+                            filePaths: absPaths,
+                            caption
+                        });
+                    } else if (absPaths.length >= 2 && typeof telegramClient.sendMediaGroupFromFiles !== 'function') {
                         sent = await telegramClient.sendPhotoFromFile({
                             chatId: bcChat,
                             messageThreadId: bcThread,
-                            filePath: fullPath,
+                            filePath: absPaths[0],
+                            caption
+                        });
+                    } else if (absPaths.length === 1) {
+                        sent = await telegramClient.sendPhotoFromFile({
+                            chatId: bcChat,
+                            messageThreadId: bcThread,
+                            filePath: absPaths[0],
                             caption
                         });
                     } else {
@@ -518,9 +557,18 @@ function createAdminRouter({
                         });
                     }
 
-                    const mid = Number(sent && sent.data && sent.data.message_id ? sent.data.message_id : 0);
-                    if (!sent.ok || !(mid > 0)) {
-                        const reason = `${sent.errorCode || 'TG_SEND'}: ${sent.message || 'SEND_FAILED'}`;
+                    let mid = 0;
+                    if (sent && sent.ok && sent.data) {
+                        if (Array.isArray(sent.data))
+                            mid = Number(
+                                sent.firstMessageId || (sent.data[0] && sent.data[0].message_id) || 0
+                            );
+                        else mid = Number(sent.data.message_id || 0);
+                    }
+                    if (!sent || !sent.ok || !(mid > 0)) {
+                        const reason = `${sent && sent.errorCode ? sent.errorCode : 'TG_SEND'}: ${
+                            sent && sent.message ? sent.message : 'SEND_FAILED'
+                        }`;
                         await promotionService.setPromotionBroadcastPlaceFailed(id, reason);
                         return res.status(502).json({
                             ok: false,
@@ -614,13 +662,53 @@ function createAdminRouter({
         );
 
         router.get(
+            '/promotion/broadcasts/:id/image/:imageRowId',
+            auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
+            async (req, res) => {
+                try {
+                    const bid = Number(req.params.id || 0);
+                    const iid = Number(req.params.imageRowId || 0);
+                    if (!(bid > 0) || !(iid > 0)) return res.status(404).end();
+                    const img = await promotionService.getBroadcastGalleryImageRow(bid, iid);
+                    if (!img) return res.status(404).end();
+                    const full = promotionService.resolveImageFullPath(img.storage_path);
+                    if (!full || !fs.existsSync(full)) return res.status(404).end();
+                    const ext = path.extname(full).toLowerCase();
+                    const type =
+                        ext === '.png'
+                            ? 'image/png'
+                            : ext === '.webp'
+                              ? 'image/webp'
+                              : ext === '.jpg' || ext === '.jpeg'
+                                ? 'image/jpeg'
+                                : 'application/octet-stream';
+                    res.setHeader('Content-Type', type);
+                    res.setHeader('Cache-Control', 'private, max-age=3600');
+                    fs.createReadStream(full).pipe(res);
+                } catch (e) {
+                    console.error('[Admin] promotion broadcast gallery image failed:', e.message || e);
+                    res.status(500).end();
+                }
+            }
+        );
+
+        router.get(
             '/promotion/broadcasts/:id/image',
             auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_PROMOTION_MANAGE),
             async (req, res) => {
                 try {
-                    const row = await promotionService.getBroadcast(req.params.id);
-                    if (!row || !row.image_storage_path) return res.status(404).end();
-                    const full = promotionService.resolveImageFullPath(row.image_storage_path);
+                    const bid = Number(req.params.id || 0);
+                    if (!(bid > 0)) return res.status(404).end();
+                    let full = '';
+                    if (typeof promotionService.getBroadcastImagePathsForPlacement === 'function') {
+                        const paths = await promotionService.getBroadcastImagePathsForPlacement(bid);
+                        if (paths[0]) full = paths[0];
+                    }
+                    if (!full || !fs.existsSync(full)) {
+                        const row = await promotionService.getBroadcast(bid);
+                        const rel = row && row.image_storage_path ? String(row.image_storage_path).trim() : '';
+                        full = rel ? promotionService.resolveImageFullPath(rel) || '' : '';
+                    }
                     if (!full || !fs.existsSync(full)) return res.status(404).end();
                     const ext = path.extname(full).toLowerCase();
                     const type =

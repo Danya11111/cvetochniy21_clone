@@ -663,7 +663,6 @@ function friendlyActionError(message) {
     if (text.includes('NOT_FOUND')) return 'Не удалось найти нужные данные. Обновите экран и попробуйте снова.';
     if (text.includes('HTTP_401') || text.includes('HTTP_403')) return 'Недостаточно прав для этого действия.';
     if (text.includes('HTTP_5')) return 'Сервис временно недоступен. Повторите через минуту.';
-    if (text.includes('KEYWORD_DUPLICATE')) return 'Такое кодовое слово уже используется. Выберите другое.';
     if (text.includes('PROMOTION_SOURCE_DELETE_FAILED'))
         return 'Не удалось удалить источник. Попробуйте позже.';
     if (text.includes('ALREADY_PLACED')) return 'Эта карточка уже размещена в теме рассылок.';
@@ -1444,11 +1443,16 @@ async function renderPromoScreen() {
         const extUrl = String(b.image_url || '').trim();
         const useLocal = !!(b.has_uploaded_image && Number(id) > 0);
         const localImgPath = useLocal && !extUrl ? `/api/admin/promotion/broadcasts/${encodeURIComponent(id)}/image` : '';
+        const extraPhotos = Number(b.extra_images_count != null ? b.extra_images_count : 0);
         let imgSmall = '';
         if (extUrl) {
-            imgSmall = `<img class="promo-bc-thumb" src="${esc(extUrl)}" alt="" loading="lazy" />`;
+            imgSmall = `<span class="promo-bc-thumb-wrap"><img class="promo-bc-thumb" src="${esc(extUrl)}" alt="" loading="lazy" />${
+                extraPhotos > 0 ? `<span class="promo-bc-thumb-badge">+${esc(String(extraPhotos))}</span>` : ''
+            }</span>`;
         } else if (localImgPath) {
-            imgSmall = `<img class="promo-bc-thumb promo-bc-await-auth" src="" data-promo-auth-src="${esc(localImgPath)}" alt="" loading="lazy" />`;
+            imgSmall = `<span class="promo-bc-thumb-wrap"><img class="promo-bc-thumb promo-bc-await-auth" src="" data-promo-auth-src="${esc(localImgPath)}" alt="" loading="lazy" />${
+                extraPhotos > 0 ? `<span class="promo-bc-thumb-badge">+${esc(String(extraPhotos))}</span>` : ''
+            }</span>`;
         } else {
             imgSmall = `<span class="promo-bc-ph" aria-hidden="true"></span>`;
         }
@@ -1488,15 +1492,37 @@ async function renderPromoScreen() {
         }
         const merged = d || b;
         const fullTxt = esc(String(merged.text || merged.body_text || txt || ''));
-        const bigExt = String((d && d.image_url) || b.image_url || '').trim();
-        const bigLocal = d && d.local_image_url ? String(d.local_image_url) : localImgPath ? localImgPath : '';
-        const bigSrc = bigExt || bigLocal;
+        const imgList = Array.isArray(merged.images) ? merged.images : [];
         let bigImg = '';
-        if (bigSrc) {
-            const needsAuth = bigSrc.includes('/api/admin/promotion/broadcasts') && bigSrc.includes('/image');
+        if (imgList.length > 1) {
+            bigImg = `<div class="promo-bc-img-grid">${imgList
+                .map((im) => {
+                    const url = esc(String(im.local_image_url || ''));
+                    if (!url) return '';
+                    const needsAuth = url.includes('/api/admin/promotion/broadcasts') && url.includes('/image');
+                    return needsAuth
+                        ? `<img class="promo-bc-grid-cell promo-bc-await-auth" src="" data-promo-auth-src="${url}" alt="" loading="lazy" />`
+                        : `<img class="promo-bc-grid-cell" src="${url}" alt="" loading="lazy" />`;
+                })
+                .filter(Boolean)
+                .join('')}</div>`;
+        } else if (imgList.length === 1) {
+            const u = esc(String(imgList[0].local_image_url || ''));
+            const needsAuth = u.includes('/api/admin/promotion/broadcasts') && u.includes('/image');
             bigImg = needsAuth
-                ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${esc(bigSrc)}" alt="" loading="lazy" />`
-                : `<img class="promo-bc-full" src="${esc(bigSrc)}" alt="" loading="lazy" />`;
+                ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${u}" alt="" loading="lazy" />`
+                : `<img class="promo-bc-full" src="${u}" alt="" loading="lazy" />`;
+        }
+        if (!bigImg) {
+            const bigExt = String((d && d.image_url) || b.image_url || '').trim();
+            const bigLocal = d && d.local_image_url ? String(d.local_image_url) : localImgPath ? localImgPath : '';
+            const bigSrc = bigExt || bigLocal;
+            if (bigSrc) {
+                const needsAuth = bigSrc.includes('/api/admin/promotion/broadcasts') && bigSrc.includes('/image');
+                bigImg = needsAuth
+                    ? `<img class="promo-bc-full promo-bc-await-auth" src="" data-promo-auth-src="${esc(bigSrc)}" alt="" loading="lazy" />`
+                    : `<img class="promo-bc-full" src="${esc(bigSrc)}" alt="" loading="lazy" />`;
+            }
         }
         const detailMeta = `<p class="promo-bc-detail-meta">${createdLine} · ${esc(placeLabel)}${ps === 'placed' && b.placed_at ? ` · размещено ${formatPromoBroadcastDateTime(b.placed_at)}` : ''}</p>`;
         const detailBlock = `
@@ -1537,9 +1563,10 @@ async function renderPromoScreen() {
         <p class="promo-inline-form__label">Новая карточка рассылки</p>
         <p class="promo-muted promo-muted--tight">После сохранения нажмите «Разместить рассылку» в списке — карточка уйдёт в тему рассылок Telegram и подключится привычный сценарий доставки. Отклики по кодовому слову в личке с ботом считаются автоматически.</p>
         <label class="promo-field">
-          Изображение (до ~600 KB, необязательно)
-          <input type="file" id="promoBcImg" accept="image/*" />
+          Изображения (до ~600 KB каждое, необязательно, не более 10)
+          <input type="file" id="promoBcImg" accept="image/*" multiple />
         </label>
+        <p id="promoBcImgHint" class="promo-muted promo-muted--tight" hidden></p>
         <label class="promo-field">
           Текст рассылки
           <textarea id="promoBcText" rows="5" maxlength="4096" required placeholder="Скидка 10% на букеты…"></textarea>
@@ -3662,19 +3689,24 @@ async function handleAction(action, value, eventTarget) {
             window.alert('Заполните текст и кодовое слово.');
             return;
         }
-        let imageBase64Payload = '';
-        if (fileEl && fileEl.files && fileEl.files[0]) {
-            const file = fileEl.files[0];
+        const imagesBase64 = [];
+        const fileList =
+            fileEl && fileEl.files && fileEl.files.length
+                ? Array.from(fileEl.files).slice(0, 10)
+                : [];
+        for (let i = 0; i < fileList.length; i++) {
+            const file = fileList[i];
             if (file.size > 620000) {
-                window.alert('Файл изображения слишком большой (лимит ~600 KB).');
+                window.alert(`Файл «${file.name || `№${i + 1}`}» слишком большой (лимит ~600 KB).`);
                 return;
             }
-            imageBase64Payload = await new Promise((resolve, reject) => {
+            const b64 = await new Promise((resolve, reject) => {
                 const fr = new FileReader();
                 fr.onload = () => resolve(typeof fr.result === 'string' ? fr.result : '');
                 fr.onerror = () => reject(new Error('FILE_READ_FAILED'));
                 fr.readAsDataURL(file);
             });
+            if (String(b64 || '').trim()) imagesBase64.push(b64);
         }
         await runGuardedAction('promo-create-bc', async () => {
             await api('/api/admin/promotion/broadcasts', {
@@ -3682,7 +3714,7 @@ async function handleAction(action, value, eventTarget) {
                 body: JSON.stringify({
                     text,
                     keyword,
-                    image_base64: imageBase64Payload || undefined
+                    images_base64: imagesBase64.length ? imagesBase64 : undefined
                 })
             });
             state.promoFormBroadcastOpen = false;
@@ -3696,6 +3728,21 @@ async function handleAction(action, value, eventTarget) {
         navigateTo(eventTarget.dataset.go);
     }
 }
+
+document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || t.id !== 'promoBcImg' || !t.files) return;
+    const n = Math.min(t.files.length, 10);
+    const hint = document.getElementById('promoBcImgHint');
+    if (!hint) return;
+    if (t.files.length > 10) {
+        hint.hidden = false;
+        hint.textContent = 'Выбрано больше 10 файлов — будут сохранены первые 10.';
+        return;
+    }
+    hint.hidden = n === 0;
+    hint.textContent = n > 0 ? `Выбрано фото: ${n}` : '';
+});
 
 document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
