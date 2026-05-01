@@ -31,16 +31,17 @@ async function upsertTelegramUserFromMessage(message) {
     const lastName = String(from.last_name || '');
     const username = String(from.username || '');
     const photoUrl = '';
+    const nowIso = new Date().toISOString();
 
     const row = await get('SELECT telegram_id FROM users WHERE telegram_id = ?', [telegramId]);
 
     if (!row) {
         await run(
             `
-            INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance, first_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             `,
-            [telegramId, firstName, lastName, username, photoUrl, 300]
+            [telegramId, firstName, lastName, username, photoUrl, 300, nowIso]
         );
         return { ok: true, created: true, bonusBalance: 300 };
     }

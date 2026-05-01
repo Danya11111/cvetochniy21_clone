@@ -31,8 +31,14 @@ const DASH_METRIC_HELP = {
     revenue: { title: 'Выручка', body: 'Сумма оплаченных заказов за выбранный период.' },
     orders_count: { title: 'Заказов', body: 'Количество всех созданных заказов за выбранный период.' },
     avg_check: { title: 'Ср. чек', body: 'Выручка за период, делённая на количество оплаченных заказов за этот период.' },
-    new_clients: { title: 'Новые клиенты', body: 'Клиенты, у которых первый заказ попал в выбранный период.' },
-    clients_total: { title: 'Все клиенты', body: 'Общее количество клиентов в базе (или оценка по заказам, если в базе пользователей пусто).' },
+    new_clients: {
+        title: 'Новые клиенты',
+        body: 'Пользователи, которые впервые появились в боте (запись в users) в выбранный период по дате первого визита. Заказ и оплата не обязательны.'
+    },
+    clients_total: {
+        title: 'Все клиенты',
+        body: 'Все пользователи в таблице users (зарегистрировались или нажали start).'
+    },
     cr: {
         title: 'CR',
         body: 'Прокси-конверсия: доля оплаченных заказов среди всех созданных заказов за выбранный период. Это не «визит → покупка».'
@@ -47,7 +53,7 @@ const DASH_METRIC_HELP = {
     },
     clients_block: {
         title: 'Клиенты',
-        body: 'Текущее количество клиентов в базе (или оценка по уникальным telegram_id в заказах), как на сервере в метрике clientsTotal.'
+        body: 'Количество записей в таблице users (все, кто появился в боте).'
     },
     response_time: {
         title: 'Скорость ответа',
@@ -66,8 +72,8 @@ const DASH_METRIC_HELP = {
         body: 'Товары с наибольшим количеством продаж в оплаченных заказах за выбранный период (разбор позиций items_json).'
     },
     order_sources: {
-        title: 'Лучшие источники заказов',
-        body: 'Пока не рассчитывается: источники заказов ещё не собираются.'
+        title: 'Лучшие источники',
+        body: 'За период: новые клиенты по источнику (first/last в профиле), переходы по ссылкам, заказы, оплаты и сумма. «Без источника» — пользователи без first/last source и заказы без source_code.'
     }
 };
 
@@ -135,6 +141,8 @@ const state = {
     analyticsPeriod: '7d',
     broadcastsFilter: 'all',
     clientsQ: '',
+    clientsV2NewQ: '',
+    clientsV2AllQ: '',
     selectedClientId: '',
     selectedBroadcastId: '',
     clientDetailTab: 'orders',
@@ -193,6 +201,8 @@ function loadUiState() {
             'analyticsPeriod',
             'broadcastsFilter',
             'clientsQ',
+            'clientsV2NewQ',
+            'clientsV2AllQ',
             'selectedClientId',
             'selectedBroadcastId',
             'clientDetailTab',
@@ -229,6 +239,8 @@ function saveUiState() {
             analyticsPeriod: state.analyticsPeriod,
             broadcastsFilter: state.broadcastsFilter,
             clientsQ: state.clientsQ,
+            clientsV2NewQ: state.clientsV2NewQ,
+            clientsV2AllQ: state.clientsV2AllQ,
             selectedClientId: state.selectedClientId,
             selectedBroadcastId: state.selectedBroadcastId,
             clientDetailTab: state.clientDetailTab,
@@ -1200,12 +1212,20 @@ function buildOrdersV2RequestPath() {
 }
 
 function buildClientsNewV2RequestPath() {
+    const q = String(state.clientsV2NewQ || '').trim();
+    const qPart = q ? `&q=${encodeURIComponent(q)}` : '';
     if (state.dashboardPreset === 'all') {
-        return '/api/admin/clients-v2?kind=new&period=all';
+        return `/api/admin/clients-v2?kind=new&period=all${qPart}`;
     }
     const f = String(state.dashboardDateFrom || '').trim();
     const t = String(state.dashboardDateTo || '').trim();
-    return `/api/admin/clients-v2?kind=new&from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
+    return `/api/admin/clients-v2?kind=new&from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}${qPart}`;
+}
+
+function buildClientsAllV2RequestPath() {
+    const q = String(state.clientsV2AllQ || '').trim();
+    const qPart = q ? `&q=${encodeURIComponent(q)}` : '';
+    return `/api/admin/clients-v2?kind=all${qPart}`;
 }
 
 function renderMiniMetricCell(label, value, danger = false, tipId = '', navAction = '') {
@@ -1310,6 +1330,7 @@ async function renderDashboardV2Screen() {
             : dashSources
                   .map((s) => {
                       const title = esc(String((s && s.title) || (s && s.code) || ''));
+                      const clients = formatNum(Number(s && s.clientsCount) || 0);
                       const clicks = formatNum(Number(s && s.clicks) || 0);
                       const ord = formatNum(Number(s && s.ordersCount) || 0);
                       const paid = formatNum(Number(s && s.paidOrdersCount) || 0);
@@ -1318,12 +1339,12 @@ async function renderDashboardV2Screen() {
                       if (sys) {
                           return `<div class="dashboard-v2__source-row dashboard-v2__source-row--system">
                 <div class="dashboard-v2__source-name">${title}</div>
-                <div class="dashboard-v2__source-meta">Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
+                <div class="dashboard-v2__source-meta">Клиентов: ${clients} · Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
             </div>`;
                       }
                       return `<div class="dashboard-v2__source-row">
                 <div class="dashboard-v2__source-name">${title}</div>
-                <div class="dashboard-v2__source-meta">Переходы: ${clicks} · Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
+                <div class="dashboard-v2__source-meta">Клиентов: ${clients} · Переходов: ${clicks} · Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
             </div>`;
                   })
                   .join('');
@@ -1396,8 +1417,8 @@ async function renderDashboardV2Screen() {
             </button>
             <article class="dashboard-v2__card dashboard-v2__card--top-carousel">${topCarouselInner}</article>
 
-            <button type="button" class="dashboard-v2__analytics-tap" data-action="dash-tip" data-tip-id="order_sources" aria-label="Источники заказов, справка">
-                <span class="dashboard-v2__subhead">Лучшие источники заказов</span>
+            <button type="button" class="dashboard-v2__analytics-tap" data-action="dash-tip" data-tip-id="order_sources" aria-label="Лучшие источники, справка">
+                <span class="dashboard-v2__subhead">Лучшие источники</span>
                 <span class="dashboard-v2__subhead-hint" aria-hidden="true">?</span>
             </button>
             <article class="dashboard-v2__card dashboard-v2__card--muted dashboard-v2__card--sources">${sourcesBlockInner}</article>
@@ -1421,15 +1442,25 @@ async function renderClientsNewScreen() {
     }
     const clients = wrap.clients || [];
     const rangeLabel = wrap.range && wrap.range.label ? wrap.range.label : '—';
+    const qRaw = String(state.clientsV2NewQ || '').trim();
+    const searchForm = `
+        <form id="miniClientsV2SearchFormNew" class="mini-clients-search">
+            <input type="search" name="q" class="mini-clients-search__input" value="${esc(qRaw)}" placeholder="Найти клиента" autocomplete="off" enterkeyhint="search" />
+        </form>`;
     if (!clients.length) {
+        const emptyMsg = qRaw
+            ? 'Клиенты не найдены'
+            : 'Новых клиентов за выбранный период нет';
         return `
         <div class="dashboard-v2 screen-enter">
+            ${searchForm}
             <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
-            <div class="dashboard-v2__empty-soft">Новых клиентов за выбранный период нет</div>
+            <div class="dashboard-v2__empty-soft">${esc(emptyMsg)}</div>
         </div>`;
     }
     return `
     <div class="dashboard-v2 screen-enter">
+        ${searchForm}
         <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
         <div class="mini-clients-stack">
         ${clients
@@ -1439,10 +1470,12 @@ async function renderClientsNewScreen() {
                 const rev = formatKopecksAsRub(c.total_revenue_kopecks || 0);
                 const un = c.username ? `@${esc(c.username)}` : esc(c.telegram_id);
                 const ph = c.phone ? ` · ${esc(c.phone)}` : '';
+                const metaDate = c.first_seen_at || c.first_order_at;
+                const metaStr = metaDate ? esc(formatOrderListDate(metaDate)) : '—';
                 return `<button type="button" class="mini-client-row" data-action="open-client-v2-card" data-id="${id}" data-list="new">
                 <div class="mini-client-row__top">
                     <span class="mini-client-row__name">${name}</span>
-                    <span class="mini-client-row__meta">${esc(formatOrderListDate(c.first_order_at))}</span>
+                    <span class="mini-client-row__meta">${metaStr}</span>
                 </div>
                 <div class="mini-client-row__sub mono">${un}${ph}</div>
                 <div class="mini-client-row__foot"><span>${formatNum(c.total_orders)} заказ.</span><span>${rev}</span></div>
@@ -1456,16 +1489,23 @@ async function renderClientsNewScreen() {
 async function renderClientsAllScreen() {
     let wrap;
     try {
-        wrap = (await api('/api/admin/clients-v2?kind=all')).data;
+        wrap = (await api(buildClientsAllV2RequestPath())).data;
     } catch (e) {
         return errorState(e.message || 'Не удалось загрузить клиентов');
     }
     const clients = wrap.clients || [];
+    const qRaw = String(state.clientsV2AllQ || '').trim();
+    const searchForm = `
+        <form id="miniClientsV2SearchFormAll" class="mini-clients-search">
+            <input type="search" name="q" class="mini-clients-search__input" value="${esc(qRaw)}" placeholder="Имя, username или Telegram ID" autocomplete="off" enterkeyhint="search" />
+        </form>`;
     if (!clients.length) {
-        return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиентов пока нет</div></div>`;
+        const emptyMsg = qRaw ? 'Клиенты не найдены' : 'Клиентов пока нет';
+        return `<div class="dashboard-v2 screen-enter">${searchForm}<div class="dashboard-v2__empty-soft">${esc(emptyMsg)}</div></div>`;
     }
     return `
     <div class="dashboard-v2 screen-enter">
+        ${searchForm}
         <div class="mini-clients-stack">
         ${clients
             .map((c) => {
@@ -1501,7 +1541,11 @@ async function renderClientCardV2Screen() {
         return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиент не найден</div></div>`;
     }
     const titleName = esc(d.full_name || d.username || d.telegram_id);
-    const dateHdr = d.first_order_at ? esc(formatOrderListDate(d.first_order_at)) : '—';
+    const dateHdr = d.first_seen_at
+        ? esc(formatOrderListDate(d.first_seen_at))
+        : d.first_order_at
+          ? esc(formatOrderListDate(d.first_order_at))
+          : '—';
     const idLine = esc(String(d.telegram_id));
     const pillOrders = formatNum(d.total_orders || 0);
     const pillSum = formatKopecksAsRub(d.total_revenue_kopecks || 0);
@@ -1524,6 +1568,8 @@ async function renderClientCardV2Screen() {
             </div>
         </div>
         <div class="client-v2-grid">
+            <div class="client-v2-k">Первый заказ</div><div class="client-v2-v">${d.first_order_at ? esc(formatOrderListDate(d.first_order_at)) : '—'}</div>
+            <div class="client-v2-k">В боте с</div><div class="client-v2-v">${d.first_seen_at ? esc(formatOrderListDate(d.first_seen_at)) : '—'}</div>
             <div class="client-v2-k">Телефон</div><div class="client-v2-v">${phone}</div>
             <div class="client-v2-k">Источник</div><div class="client-v2-v">${src}</div>
             <div class="client-v2-k">Telegram</div><div class="client-v2-v">${tg}</div>
@@ -1586,14 +1632,15 @@ async function renderPromoScreen() {
         const isSystem = r.is_system === true || code === '__none__';
         const expanded = !!state.promoExpandedSources[code];
         const d = expanded ? state.promoDetailByCode[code] : null;
+        const listClientsCount = Number(r.clients_count != null ? r.clients_count : 0);
         const listClicks = Number(r.clicks_count || 0);
         const listPaid = Number(r.paid_orders_count || 0);
         const listOrd = Number(r.orders_count != null ? r.orders_count : 0);
         const listRevStr = esc(formatKopecksAsRub(r.paid_revenue_kopecks || 0));
         const url = String(r.tracking_url || '').trim();
         const metricsLine = isSystem
-            ? `Заказов: ${formatNum(listOrd)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`
-            : `Переходы: ${formatNum(listClicks)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`;
+            ? `Клиентов: ${formatNum(listClientsCount)} · Заказов: ${formatNum(listOrd)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`
+            : `Клиентов: ${formatNum(listClientsCount)} · Переходы: ${formatNum(listClicks)} · Заказов: ${formatNum(listOrd)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`;
         const chipOrPill = isSystem
             ? `<span class="promo-row__sys-pill" aria-hidden="true">системный</span>`
             : `<span class="promo-code-chip mono promo-code-chip--src">${esc(code)}</span>`;
@@ -1612,6 +1659,7 @@ async function renderPromoScreen() {
         const paidDetail = Number((d || r).paid_orders_count ?? listPaid ?? 0);
         const createdN = Number((d || r).created_orders_count ?? r.orders_count ?? 0);
         const sumStr = esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0));
+        const clientsN = Number((d || r).clients_count ?? listClientsCount ?? 0);
         const kvRow = (label, numHtml) =>
             `<div class="promo-src-kv-row">
                 <span class="promo-src-kv-row__lab">${esc(label)}: </span>
@@ -1625,11 +1673,13 @@ async function renderPromoScreen() {
             </div>`;
         const detailMetrics = isSystem
             ? `<div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
+                ${kvRow('Клиенты', formatNum(clientsN))}
                 ${kvRow('Создано заказов', formatNum(createdN))}
                 ${kvRow('Оплаченных заказов', formatNum(paidDetail))}
                 ${kvRubRow}
             </div>`
             : `<div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
+                ${kvRow('Клиенты', formatNum(clientsN))}
                 ${kvRow('Переходы', formatNum(clicksN))}
                 ${kvRow('Создано заказов', formatNum(createdN))}
                 ${kvRow('Оплаченных заказов', formatNum(paidDetail))}
@@ -3221,14 +3271,33 @@ async function renderApp() {
 }
 
 function bindForms() {
-    const form = document.getElementById('clientsSearchForm');
-    if (!form) return;
-    form.addEventListener('submit', (event) => {
-        event.preventDefault();
-        const input = document.getElementById('clientsSearchInput');
-        state.clientsQ = input ? String(input.value || '').trim() : '';
-        renderApp();
-    });
+    const legacy = document.getElementById('clientsSearchForm');
+    if (legacy) {
+        legacy.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const input = document.getElementById('clientsSearchInput');
+            state.clientsQ = input ? String(input.value || '').trim() : '';
+            renderApp();
+        });
+    }
+    const v2New = document.getElementById('miniClientsV2SearchFormNew');
+    if (v2New) {
+        v2New.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const fd = new FormData(v2New);
+            state.clientsV2NewQ = String(fd.get('q') || '').trim();
+            renderApp();
+        });
+    }
+    const v2All = document.getElementById('miniClientsV2SearchFormAll');
+    if (v2All) {
+        v2All.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const fd = new FormData(v2All);
+            state.clientsV2AllQ = String(fd.get('q') || '').trim();
+            renderApp();
+        });
+    }
 }
 
 async function hydratePromoAuthImages() {

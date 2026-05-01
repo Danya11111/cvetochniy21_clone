@@ -108,7 +108,7 @@ function dbAll(db, sql, params = []) {
         [start, end]
     );
     const titles = await dbAll(db, `SELECT code, title FROM promotion_sources WHERE COALESCE(is_active, 1) = 1`, []);
-    const merged = mergeDashboardSourcesForApi(clicks, orderRows, titles);
+    const merged = mergeDashboardSourcesForApi(clicks, orderRows, [], titles);
     assert.ok(merged.some((x) => x.code === none && x.isSystem === true), 'merge: строка «Без источника»');
     const noneRow = merged.find((x) => x.code === none);
     assert.strictEqual(noneRow.ordersCount, 2);
@@ -117,6 +117,12 @@ function dbAll(db, sql, params = []) {
         merged.some((x) => x.code === 'tg_bot' && x.clicks === 2 && x.ordersCount === 2),
         'источник с переходами и заказами'
     );
+
+    const noneOnlyMerge = mergeDashboardSourcesForApi([], [], [{ code: none, clients_count: 2 }], []);
+    assert.strictEqual(noneOnlyMerge.length, 1);
+    assert.strictEqual(noneOnlyMerge[0].code, none);
+    assert.strictEqual(noneOnlyMerge[0].clientsCount, 2);
+    assert.strictEqual(noneOnlyMerge[0].isSystem, true);
 
     db.close();
     process.stdout.write('PASS admin-dashboard sources __none__ SQL\n');

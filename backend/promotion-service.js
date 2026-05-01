@@ -8,6 +8,20 @@ const { sqlOrderPaidRevenueKopecks } = require('./money');
 const START_PREFIX = 'src_';
 /** Зарезервировано: псевдо-источник «заказы без source_code» (нет в promotion_sources). */
 const PROMOTION_SYSTEM_NONE_CODE = '__none__';
+/** Совпадает с admin-dashboard-service sqlUserSourceBucketExpr (first → last → __none__). */
+function sqlUserPromotionSourceBucket(alias = 'u') {
+    const a = alias;
+    const none = `'${PROMOTION_SYSTEM_NONE_CODE}'`;
+    return `
+        CASE
+            WHEN NULLIF(TRIM(COALESCE(${a}.first_source_code, '')), '') IS NOT NULL
+                THEN TRIM(${a}.first_source_code)
+            WHEN NULLIF(TRIM(COALESCE(${a}.last_source_code, '')), '') IS NOT NULL
+                THEN TRIM(${a}.last_source_code)
+            ELSE ${none}
+        END
+    `;
+}
 const MAX_TITLE_LEN = 120;
 const MAX_CODE_LEN = 64;
 const MAX_BROADCAST_BODY = 4096;
@@ -244,6 +258,22 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     }
 
     async function listSources() {
+        const bucketSql = sqlUserPromotionSourceBucket('u');
+        const bucketRows = await dbAll(
+            db,
+            `
+            SELECT (${bucketSql}) AS code, COUNT(*) AS c
+            FROM users u
+            WHERE u.telegram_id IS NOT NULL
+              AND TRIM(CAST(u.telegram_id AS TEXT)) <> ''
+            GROUP BY (${bucketSql})
+            `
+        );
+        /** @type {Map<string, number>} */
+        const clientsByBucket = new Map(
+            (bucketRows || []).map((row) => [String(row.code || '').trim(), Math.round(Number(row.c || 0))])
+        );
+
         const rows = await dbAll(
             db,
             `SELECT s.*,
@@ -283,6 +313,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 is_system: false,
                 clicks_count: Number(r.clicks_count || 0),
                 unique_users_count: Number(r.unique_users_count || 0),
+                clients_count: clientsByBucket.get(code) || 0,
                 orders_count: Math.round(Number(paidAgg?.orders_total || 0)),
                 paid_orders_count: Math.round(Number(paidAgg?.paid_orders || 0)),
                 paid_revenue_kopecks: Math.round(Number(paidAgg?.revenue_k || 0)),
@@ -302,7 +333,8 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         const noneCreated = Math.round(Number(noneOrd?.created_orders || 0));
         const nonePaid = Math.round(Number(noneOrd?.paid_orders || 0));
         const noneRev = Math.round(Number(noneOrd?.revenue_k || 0));
-        if (noneCreated > 0 || nonePaid > 0 || noneRev > 0) {
+        const noneClients = clientsByBucket.get(PROMOTION_SYSTEM_NONE_CODE) || 0;
+        if (noneCreated > 0 || nonePaid > 0 || noneRev > 0 || noneClients > 0) {
             out.push({
                 id: null,
                 code: PROMOTION_SYSTEM_NONE_CODE,
@@ -313,6 +345,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 is_system: true,
                 clicks_count: 0,
                 unique_users_count: 0,
+                clients_count: noneClients,
                 orders_count: noneCreated,
                 paid_orders_count: nonePaid,
                 paid_revenue_kopecks: noneRev,
@@ -327,21 +360,36 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         if (!c) return null;
         if (c === PROMOTION_SYSTEM_NONE_CODE) {
             const revExpr = sqlOrderPaidRevenueKopecks('o');
-            const ord = await dbGet(
-                db,
-                `SELECT
-                    COUNT(*) AS created_orders,
-                    SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
-                    COALESCE(SUM((${revExpr})), 0) AS revenue_k
-                 FROM orders o
-                 WHERE o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''`
-            );
+            const bucketSql = sqlUserPromotionSourceBucket('u');
+            const [ord, noneClientsRow] = await Promise.all([
+                dbGet(
+                    db,
+                    `SELECT
+                        COUNT(*) AS created_orders,
+                        SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
+                        COALESCE(SUM((${revExpr})), 0) AS revenue_k
+                     FROM orders o
+                     WHERE o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''`
+                ),
+                dbGet(
+                    db,
+                    `
+                    SELECT COUNT(*) AS c
+                    FROM users u
+                    WHERE u.telegram_id IS NOT NULL
+                      AND TRIM(CAST(u.telegram_id AS TEXT)) <> ''
+                      AND (${bucketSql}) = ?
+                    `,
+                    [PROMOTION_SYSTEM_NONE_CODE]
+                )
+            ]);
             return {
                 code: PROMOTION_SYSTEM_NONE_CODE,
                 title: 'Без источника',
                 is_system: true,
                 clicks_count: 0,
                 unique_users_count: 0,
+                clients_count: Math.round(Number(noneClientsRow?.c || 0)),
                 created_orders_count: Math.round(Number(ord?.created_orders || 0)),
                 paid_orders_count: Math.round(Number(ord?.paid_orders || 0)),
                 paid_revenue_kopecks: Math.round(Number(ord?.revenue_k || 0)),
@@ -366,16 +414,30 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             [s.id]
         );
         const revExpr = sqlOrderPaidRevenueKopecks('o');
-        const ord = await dbGet(
-            db,
-            `SELECT
-                COUNT(*) AS created_orders,
-                SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
-                COALESCE(SUM((${revExpr})), 0) AS revenue_k
-             FROM orders o
-             WHERE o.source_code = ?`,
-            [c]
-        );
+        const bucketSql = sqlUserPromotionSourceBucket('u');
+        const [ord, clientsRow] = await Promise.all([
+            dbGet(
+                db,
+                `SELECT
+                    COUNT(*) AS created_orders,
+                    SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
+                    COALESCE(SUM((${revExpr})), 0) AS revenue_k
+                 FROM orders o
+                 WHERE o.source_code = ?`,
+                [c]
+            ),
+            dbGet(
+                db,
+                `
+                SELECT COUNT(*) AS c
+                FROM users u
+                WHERE u.telegram_id IS NOT NULL
+                  AND TRIM(CAST(u.telegram_id AS TEXT)) <> ''
+                  AND (${bucketSql}) = ?
+                `,
+                [c]
+            )
+        ]);
 
         let tracking_url = '';
         try {
@@ -387,6 +449,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             is_system: false,
             clicks_count: Number(clicks?.c || 0),
             unique_users_count: Number(uniq?.c || 0),
+            clients_count: Math.round(Number(clientsRow?.c || 0)),
             created_orders_count: Math.round(Number(ord?.created_orders || 0)),
             paid_orders_count: Math.round(Number(ord?.paid_orders || 0)),
             paid_revenue_kopecks: Math.round(Number(ord?.revenue_k || 0)),

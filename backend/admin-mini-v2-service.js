@@ -9,7 +9,7 @@ const {
     getDashboardPeriodRange,
     getCustomDashboardPeriodRange,
     getAllTimeDashboardPeriodRange,
-    getSqlNewClientsFirstOrderInRangeSubquery,
+    sqlUserFirstSeenJulianDay,
     sqlOrderCreatedJulianDay
 } = require('./admin-dashboard-service');
 const { orderPaidRevenueKopecksFromRow, kopecksToWholeRub, sqlOrderPaidRevenueKopecks } = require('./money');
@@ -88,19 +88,53 @@ async function listOrdersV2ForRange(range) {
     });
 }
 
-async function listClientsNewForRange(range) {
+function normalizeClientsSearchQ(q) {
+    return String(q || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^@+/, '')
+        .slice(0, 96);
+}
+
+/**
+ * @returns {{ clause: string, params: string[] }}
+ */
+function buildUsersSearchSqlAndParams(tableAlias, qRaw) {
+    const q = normalizeClientsSearchQ(qRaw);
+    if (!q) return { clause: '', params: [] };
+    const a = tableAlias || 'u';
+    const like = `%${q}%`;
+    const phoneNorm = `%${q.replace(/\s+/g, '').replace(/-/g, '')}%`;
+    const clause = `
+        AND (
+            LOWER(COALESCE(${a}.first_name, '') || ' ' || COALESCE(${a}.last_name, '')) LIKE ?
+            OR LOWER(COALESCE(${a}.username, '')) LIKE ?
+            OR LOWER(REPLACE(COALESCE(${a}.username, ''), '@', '')) LIKE ?
+            OR LOWER(TRIM(CAST(${a}.telegram_id AS TEXT))) LIKE ?
+            OR EXISTS (
+                SELECT 1 FROM orders op
+                WHERE TRIM(CAST(op.telegram_id AS TEXT)) = TRIM(CAST(${a}.telegram_id AS TEXT))
+                  AND REPLACE(REPLACE(LOWER(TRIM(COALESCE(op.phone, ''))), ' ', ''), '-', '') LIKE ?
+            )
+        )
+    `;
+    return { clause, params: [like, like, like, like, phoneNorm] };
+}
+
+async function listClientsNewForRange(range, qRaw = '') {
     const revExpr = sqlOrderPaidRevenueKopecks('ox');
-    const newSub = getSqlNewClientsFirstOrderInRangeSubquery();
-    const foOrder = sqlOrderCreatedJulianDay('o2.created_at');
+    const jd = sqlUserFirstSeenJulianDay('u.first_seen_at');
+    const { clause: searchClause, params: searchParams } = buildUsersSearchSqlAndParams('u', qRaw);
     const rows = await dbAll(
         `
         SELECT
-            x.telegram_id,
+            TRIM(CAST(u.telegram_id AS TEXT)) AS telegram_id,
+            u.first_seen_at,
             (SELECT o2.created_at FROM orders o2
-             WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = x.telegram_id
+             WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = TRIM(CAST(u.telegram_id AS TEXT))
                AND o2.created_at IS NOT NULL
                AND TRIM(COALESCE(o2.created_at, '')) <> ''
-             ORDER BY ${foOrder} ASC
+             ORDER BY ${sqlOrderCreatedJulianDay('o2.created_at')} ASC
              LIMIT 1) AS first_order_at,
             u.first_name,
             u.last_name,
@@ -109,13 +143,12 @@ async function listClientsNewForRange(range) {
             u.last_source_code,
             COALESCE(u.bonus_balance, 0) AS bonus_balance,
             (SELECT op.phone FROM orders op
-             WHERE TRIM(CAST(op.telegram_id AS TEXT)) = x.telegram_id AND TRIM(COALESCE(op.phone,'')) <> ''
+             WHERE TRIM(CAST(op.telegram_id AS TEXT)) = TRIM(CAST(u.telegram_id AS TEXT)) AND TRIM(COALESCE(op.phone,'')) <> ''
              ORDER BY op.id DESC LIMIT 1) AS phone_hint,
             COALESCE(oc.total_orders, 0) AS total_orders,
             COALESCE(oc.paid_orders, 0) AS paid_orders,
             COALESCE(oc.total_revenue, 0) AS total_revenue
-        FROM (${newSub}) x
-        LEFT JOIN users u ON TRIM(CAST(u.telegram_id AS TEXT)) = x.telegram_id
+        FROM users u
         LEFT JOIN (
             SELECT TRIM(CAST(ox.telegram_id AS TEXT)) AS telegram_id,
                 COUNT(*) AS total_orders,
@@ -124,11 +157,18 @@ async function listClientsNewForRange(range) {
             FROM orders ox
             WHERE ox.telegram_id IS NOT NULL AND TRIM(CAST(ox.telegram_id AS TEXT)) <> ''
             GROUP BY TRIM(CAST(ox.telegram_id AS TEXT))
-        ) oc ON oc.telegram_id = x.telegram_id
-        ORDER BY first_order_at DESC, x.telegram_id DESC
+        ) oc ON oc.telegram_id = TRIM(CAST(u.telegram_id AS TEXT))
+        WHERE u.telegram_id IS NOT NULL
+          AND TRIM('' || u.telegram_id) <> ''
+          AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+          AND (${jd}) IS NOT NULL
+          AND (${jd}) >= julianday(?)
+          AND (${jd}) <= julianday(?)
+          ${searchClause}
+        ORDER BY u.first_seen_at DESC, u.telegram_id DESC
         LIMIT 500
         `,
-        [range.periodStartIso, range.periodEndIso]
+        [range.periodStartIso, range.periodEndIso, ...searchParams]
     );
 
     return rows.map((r) => {
@@ -142,6 +182,7 @@ async function listClientsNewForRange(range) {
             last_name: r.last_name || null,
             username: r.username || null,
             phone: r.phone_hint ? String(r.phone_hint) : null,
+            first_seen_at: r.first_seen_at || null,
             first_order_at: r.first_order_at || null,
             first_source_code: r.first_source_code ? String(r.first_source_code) : null,
             last_source_code: r.last_source_code ? String(r.last_source_code) : null,
@@ -153,12 +194,14 @@ async function listClientsNewForRange(range) {
     });
 }
 
-async function listClientsAllV2() {
+async function listClientsAllV2(qRaw = '') {
     const revExpr = sqlOrderPaidRevenueKopecks('ox');
+    const { clause: searchClause, params: searchParams } = buildUsersSearchSqlAndParams('u', qRaw);
     const rows = await dbAll(
         `
         SELECT
-            ai.telegram_id,
+            TRIM(CAST(u.telegram_id AS TEXT)) AS telegram_id,
+            u.first_seen_at,
             u.first_name,
             u.last_name,
             u.username,
@@ -166,34 +209,31 @@ async function listClientsAllV2() {
             u.last_source_code,
             COALESCE(u.bonus_balance, 0) AS bonus_balance,
             (SELECT op.phone FROM orders op
-             WHERE op.telegram_id = ai.telegram_id AND TRIM(COALESCE(op.phone,'')) <> ''
+             WHERE TRIM(CAST(op.telegram_id AS TEXT)) = TRIM(CAST(u.telegram_id AS TEXT)) AND TRIM(COALESCE(op.phone,'')) <> ''
              ORDER BY op.id DESC LIMIT 1) AS phone_hint,
-            COALESCE(oc.first_order_at, NULL) AS first_order_at,
+            (SELECT ox.created_at FROM orders ox
+             WHERE TRIM(CAST(ox.telegram_id AS TEXT)) = TRIM(CAST(u.telegram_id AS TEXT))
+             ORDER BY ${sqlOrderCreatedJulianDay('ox.created_at')} ASC
+             LIMIT 1) AS first_order_at,
             COALESCE(oc.total_orders, 0) AS total_orders,
             COALESCE(oc.paid_orders, 0) AS paid_orders,
             COALESCE(oc.total_revenue, 0) AS total_revenue
-        FROM (
-            SELECT telegram_id FROM users
-            UNION
-            SELECT DISTINCT telegram_id FROM orders
-            WHERE telegram_id IS NOT NULL AND TRIM(telegram_id) <> ''
-        ) ai
-        LEFT JOIN users u ON u.telegram_id = ai.telegram_id
+        FROM users u
         LEFT JOIN (
-            SELECT ox.telegram_id,
-                MIN(ox.created_at) AS first_order_at,
-                MAX(ox.created_at) AS last_order_at,
+            SELECT TRIM(CAST(ox.telegram_id AS TEXT)) AS telegram_id,
                 COUNT(*) AS total_orders,
                 SUM(CASE WHEN (${PAID_SQL_OX}) THEN 1 ELSE 0 END) AS paid_orders,
                 COALESCE(SUM((${revExpr})), 0) AS total_revenue
             FROM orders ox
-            GROUP BY ox.telegram_id
-        ) oc ON oc.telegram_id = ai.telegram_id
-        ORDER BY
-            COALESCE(oc.last_order_at, '') DESC,
-            ai.telegram_id DESC
+            WHERE ox.telegram_id IS NOT NULL AND TRIM(CAST(ox.telegram_id AS TEXT)) <> ''
+            GROUP BY TRIM(CAST(ox.telegram_id AS TEXT))
+        ) oc ON oc.telegram_id = TRIM(CAST(u.telegram_id AS TEXT))
+        WHERE TRIM('' || u.telegram_id) <> ''
+          ${searchClause}
+        ORDER BY COALESCE(u.first_seen_at, '') DESC, u.telegram_id DESC
         LIMIT 800
-        `
+        `,
+        [...searchParams]
     );
 
     return rows.map((r) => {
@@ -207,6 +247,7 @@ async function listClientsAllV2() {
             last_name: r.last_name || null,
             username: r.username || null,
             phone: r.phone_hint ? String(r.phone_hint) : null,
+            first_seen_at: r.first_seen_at || null,
             first_order_at: r.first_order_at || null,
             first_source_code: r.first_source_code ? String(r.first_source_code) : null,
             last_source_code: r.last_source_code ? String(r.last_source_code) : null,
@@ -217,7 +258,6 @@ async function listClientsAllV2() {
         };
     });
 }
-
 function pickSourceCode(u, fallbackFirst, fallbackLast) {
     const a = u && u.first_source_code ? String(u.first_source_code) : '';
     const b = u && u.last_source_code ? String(u.last_source_code) : '';
@@ -285,6 +325,7 @@ async function getClientV2Detail(telegramId) {
         full_name: fn || null,
         username,
         phone: phoneRow && phoneRow.phone ? String(phoneRow.phone) : null,
+        first_seen_at: u && u.first_seen_at ? String(u.first_seen_at) : null,
         source_code: pickSourceCode(u, src && src.source_code, srcLast && srcLast.source_code),
         first_source_code: u && u.first_source_code ? String(u.first_source_code) : (src && src.source_code ? String(src.source_code) : null),
         last_source_code: u && u.last_source_code ? String(u.last_source_code) : (srcLast && srcLast.source_code ? String(srcLast.source_code) : null),
@@ -302,5 +343,7 @@ module.exports = {
     listOrdersV2ForRange,
     listClientsNewForRange,
     listClientsAllV2,
-    getClientV2Detail
+    getClientV2Detail,
+    normalizeClientsSearchQ,
+    buildUsersSearchSqlAndParams
 };

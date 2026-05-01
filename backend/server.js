@@ -1140,6 +1140,8 @@ app.post('/api/user/init', (req, res) => {
         return res.status(400).json({ error: 'telegramId is required' });
     }
 
+    const nowUserIso = new Date().toISOString();
+
     db.get(
         'SELECT telegram_id FROM users WHERE telegram_id = ?',
         [telegramId],
@@ -1153,10 +1155,10 @@ app.post('/api/user/init', (req, res) => {
                 // Первый вход -> 500 бонусов
                 db.run(
                     `
-          INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance, first_seen_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
           `,
-                    [telegramId, firstName || '', lastName || '', username || '', photoUrl || '', 300],
+                    [telegramId, firstName || '', lastName || '', username || '', photoUrl || '', 300, nowUserIso],
                     err2 => {
                         if (err2) {
                             console.error('Error inserting user:', err2);

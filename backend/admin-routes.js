@@ -244,11 +244,13 @@ function createAdminRouter({
         const kind = String(req.query.kind || 'new').toLowerCase();
         try {
             if (kind === 'all') {
-                const clients = await listClientsAllV2();
+                const searchQ = String(req.query.q || '').trim();
+                const clients = await listClientsAllV2(searchQ);
                 return res.json({ ok: true, data: { kind: 'all', clients } });
             }
             const { range, periodApi } = resolveDashboardLikeRangeFromQuery(req.query || {});
-            const clients = await listClientsNewForRange(range);
+            const searchQ = String(req.query.q || '').trim();
+            const clients = await listClientsNewForRange(range, searchQ);
             return res.json({
                 ok: true,
                 data: {

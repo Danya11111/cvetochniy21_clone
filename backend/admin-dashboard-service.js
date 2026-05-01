@@ -16,6 +16,10 @@ const {
 const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
 const CANCELLED_SQL_O = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
 
+const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
+const DASHBOARD_SYSTEM_NONE_TITLE = 'Без источника';
+const DASHBOARD_TOP_SOURCES_LIMIT = 5;
+
 /**
  * Julian day для created_at заказа: не полагаться на MIN(created_at) как TEXT —
  * при смеси '…T…Z' и 'YYYY-MM-DD HH:MM:SS' лексикографический MIN неверен.
@@ -32,23 +36,56 @@ function sqlOrderCreatedJulianDay(colRef) {
 }
 
 /**
- * Подзапрос: по одному telegram_id — клиент «новый в периоде», если минимальный по времени
- * первый заказ попадает в [julianday(?), julianday(?)] (те же ISO-границы, что и список заказов).
+ * Julian day для users.first_seen_at (TEXT ISO / локальные форматы).
+ * @param {string} colRef например `u.first_seen_at`
+ */
+function sqlUserFirstSeenJulianDay(colRef) {
+    const c = String(colRef || 'first_seen_at').trim() || 'first_seen_at';
+    const cast = `trim(cast(${c} AS TEXT))`;
+    return `COALESCE(
+        julianday(${c}),
+        julianday(replace(substr(replace(${cast}, 'Z', ''), 1, 19), 'T', ' ')),
+        julianday(substr(replace(${cast}, 'Z', ''), 1, 10))
+    )`;
+}
+
+/** SQL bucket источника пользователя: first_source_code, иначе last, иначе __none__. */
+function sqlUserSourceBucketExpr(alias = 'u') {
+    const a = alias;
+    const none = `'${DASHBOARD_SYSTEM_NONE_CODE}'`;
+    return `
+        CASE
+            WHEN NULLIF(TRIM(COALESCE(${a}.first_source_code, '')), '') IS NOT NULL
+                THEN TRIM(${a}.first_source_code)
+            WHEN NULLIF(TRIM(COALESCE(${a}.last_source_code, '')), '') IS NOT NULL
+                THEN TRIM(${a}.last_source_code)
+            ELSE ${none}
+        END
+    `;
+}
+
+/**
+ * Пользователи, у которых first_seen_at попадает в период (julianday границы как у dashboard).
+ */
+function getSqlNewUsersInPeriodSubquery() {
+    const jd = sqlUserFirstSeenJulianDay('u.first_seen_at');
+    return `
+        SELECT TRIM(CAST(u.telegram_id AS TEXT)) AS telegram_id
+        FROM users u
+        WHERE u.telegram_id IS NOT NULL
+          AND TRIM('' || u.telegram_id) <> ''
+          AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+          AND (${jd}) IS NOT NULL
+          AND (${jd}) >= julianday(?)
+          AND (${jd}) <= julianday(?)
+    `;
+}
+
+/**
+ * @deprecated Использовалось для старой логики «первый заказ»; оставлено для совместимости тестовых импортов.
  */
 function getSqlNewClientsFirstOrderInRangeSubquery() {
-    const jd = sqlOrderCreatedJulianDay('created_at');
-    return `
-        SELECT TRIM(CAST(telegram_id AS TEXT)) AS telegram_id
-        FROM orders
-        WHERE telegram_id IS NOT NULL
-          AND TRIM(CAST(telegram_id AS TEXT)) <> ''
-          AND created_at IS NOT NULL
-          AND TRIM(COALESCE(created_at, '')) <> ''
-        GROUP BY TRIM(CAST(telegram_id AS TEXT))
-        HAVING MIN(${jd}) IS NOT NULL
-           AND MIN(${jd}) >= julianday(?)
-           AND MIN(${jd}) <= julianday(?)
-    `;
+    return getSqlNewUsersInPeriodSubquery();
 }
 
 function dbGet(sql, params = []) {
@@ -262,18 +299,14 @@ function aggregateTopProductsFromOrders(orderRows) {
     return [...acc.values()].sort((a, b) => b.qty - a.qty).slice(0, 10);
 }
 
-/** Системный псевдо-источник в отчётах: заказы без `orders.source_code`. */
-const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
-const DASHBOARD_SYSTEM_NONE_TITLE = 'Без источника';
-const DASHBOARD_TOP_SOURCES_LIMIT = 5;
-
 /**
  * Сборка списка «Лучшие источники» для dashboard-v2 (чистая функция — удобно для тестов).
  * @param {Array<{code?: string, clicks?: number, c?: number}>} clickRows
  * @param {Array<{code?: string, orders_count?: number, paid_orders_count?: number, revenue_kopecks?: number}>} orderRows
+ * @param {Array<{code?: string, clients_count?: number, cc?: number}>} userBucketRows — новые пользователи в периоде по bucket источника
  * @param {Array<{code?: string, title?: string}>} promoTitleRows
  */
-function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
+function mergeDashboardSourcesForApi(clickRows, orderRows, userBucketRows, promoTitleRows) {
     const titleByCode = new Map(
         (promoTitleRows || []).map((r) => {
             const code = String(r.code || '').trim();
@@ -301,6 +334,14 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
         });
     }
 
+    /** @type {Map<string, number>} */
+    const clientsMap = new Map();
+    for (const r of userBucketRows || []) {
+        const codeRaw = String(r.code || '').trim();
+        const code = codeRaw || DASHBOARD_SYSTEM_NONE_CODE;
+        clientsMap.set(code, Math.round(Number(r.clients_count != null ? r.clients_count : r.cc || 0)));
+    }
+
     /** @type {Set<string>} */
     const codes = new Set();
     for (const c of titleByCode.keys()) {
@@ -312,20 +353,27 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
     for (const c of orderMap.keys()) {
         if (c && c !== DASHBOARD_SYSTEM_NONE_CODE) codes.add(c);
     }
+    for (const c of clientsMap.keys()) {
+        if (c && c !== DASHBOARD_SYSTEM_NONE_CODE) codes.add(c);
+    }
 
-    /** @type {Array<{ code: string, title: string, clicks: number, ordersCount: number, paidOrdersCount: number, revenueKopecks: number, isSystem: boolean }>} */
+    /** @type {Array<{ code: string, title: string, clicks: number, clientsCount: number, ordersCount: number, paidOrdersCount: number, revenueKopecks: number, isSystem: boolean }>} */
     const out = [];
 
     for (const code of codes) {
         const clicks = clickMap.get(code) || 0;
+        const clientsCount = clientsMap.get(code) || 0;
         const o = orderMap.get(code) || { ordersCount: 0, paidOrdersCount: 0, revenueKopecks: 0 };
-        if (clicks === 0 && o.ordersCount === 0 && o.paidOrdersCount === 0 && o.revenueKopecks === 0) continue;
+        if (clicks === 0 && clientsCount === 0 && o.ordersCount === 0 && o.paidOrdersCount === 0 && o.revenueKopecks === 0) {
+            continue;
+        }
 
         const title = titleByCode.get(code) || code;
         out.push({
             code,
             title,
             clicks,
+            clientsCount,
             ordersCount: o.ordersCount,
             paidOrdersCount: o.paidOrdersCount,
             revenueKopecks: o.revenueKopecks,
@@ -333,15 +381,23 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
         });
     }
 
-    const noneO = orderMap.get(DASHBOARD_SYSTEM_NONE_CODE);
+    const noneClients = clientsMap.get(DASHBOARD_SYSTEM_NONE_CODE) || 0;
+    const noneO = orderMap.get(DASHBOARD_SYSTEM_NONE_CODE) || {
+        ordersCount: 0,
+        paidOrdersCount: 0,
+        revenueKopecks: 0
+    };
     if (
-        noneO &&
-        (noneO.ordersCount > 0 || noneO.paidOrdersCount > 0 || noneO.revenueKopecks > 0)
+        noneClients > 0 ||
+        noneO.ordersCount > 0 ||
+        noneO.paidOrdersCount > 0 ||
+        noneO.revenueKopecks > 0
     ) {
         out.push({
             code: DASHBOARD_SYSTEM_NONE_CODE,
             title: DASHBOARD_SYSTEM_NONE_TITLE,
             clicks: 0,
+            clientsCount: noneClients,
             ordersCount: noneO.ordersCount,
             paidOrdersCount: noneO.paidOrdersCount,
             revenueKopecks: noneO.revenueKopecks,
@@ -353,6 +409,7 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
         if (b.revenueKopecks !== a.revenueKopecks) return b.revenueKopecks - a.revenueKopecks;
         if (b.paidOrdersCount !== a.paidOrdersCount) return b.paidOrdersCount - a.paidOrdersCount;
         if (b.ordersCount !== a.ordersCount) return b.ordersCount - a.ordersCount;
+        if (b.clientsCount !== a.clientsCount) return b.clientsCount - a.clientsCount;
         return b.clicks - a.clicks;
     });
 
@@ -362,8 +419,10 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
 async function fetchDashboardSourcesForRange(range) {
     const { periodStartIso, periodEndIso } = range;
     const revExpr = sqlOrderPaidRevenueKopecks('o');
+    const bucketSql = sqlUserSourceBucketExpr('u');
+    const uJd = sqlUserFirstSeenJulianDay('u.first_seen_at');
 
-    const [clickRows, orderRows, promoTitleRows] = await Promise.all([
+    const [clickRows, orderRows, userBucketRows, promoTitleRows] = await Promise.all([
         dbAll(
             `
             SELECT TRIM(source_code) AS code, COUNT(*) AS clicks
@@ -394,10 +453,24 @@ async function fetchDashboardSourcesForRange(range) {
             `,
             [periodStartIso, periodEndIso]
         ),
+        dbAll(
+            `
+            SELECT (${bucketSql}) AS code, COUNT(*) AS clients_count
+            FROM users u
+            WHERE u.telegram_id IS NOT NULL
+              AND TRIM('' || u.telegram_id) <> ''
+              AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+              AND (${uJd}) IS NOT NULL
+              AND (${uJd}) >= julianday(?)
+              AND (${uJd}) <= julianday(?)
+            GROUP BY (${bucketSql})
+            `,
+            [periodStartIso, periodEndIso]
+        ),
         dbAll(`SELECT code, title FROM promotion_sources WHERE COALESCE(is_active, 1) = 1`, [])
     ]);
 
-    return mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows);
+    return mergeDashboardSourcesForApi(clickRows, orderRows, userBucketRows, promoTitleRows);
 }
 
 async function hydrateTopProductImages(items) {
@@ -458,7 +531,7 @@ async function fetchDashboardMetricsForRange(range) {
             []
         ),
         dbGet(
-            `SELECT COUNT(*) AS c FROM (${getSqlNewClientsFirstOrderInRangeSubquery()}) nc`,
+            `SELECT COUNT(*) AS c FROM (${getSqlNewUsersInPeriodSubquery()}) nc`,
             [periodStartIso, periodEndIso]
         ),
         dbGet(`SELECT COUNT(*) AS c FROM users`, []),
@@ -650,8 +723,11 @@ module.exports = {
     fetchDashboardMetrics,
     getDashboardV2ApiPayload,
     formatRuDate,
+    getSqlNewUsersInPeriodSubquery,
     getSqlNewClientsFirstOrderInRangeSubquery,
     sqlOrderCreatedJulianDay,
+    sqlUserFirstSeenJulianDay,
+    sqlUserSourceBucketExpr,
     mergeDashboardSourcesForApi,
     fetchDashboardSourcesForRange,
     DASHBOARD_SYSTEM_NONE_CODE

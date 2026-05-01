@@ -1986,6 +1986,24 @@ button.dashboard-v2__dash-row {
     color: var(--text-soft);
 }
 
+.mini-clients-search {
+    margin: 0 0 10px;
+}
+
+.mini-clients-search__input {
+    width: 100%;
+    max-width: 320px;
+    box-sizing: border-box;
+    display: block;
+    padding: 8px 10px;
+    font-size: 14px;
+    line-height: 1.2;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    color: var(--text-main);
+}
+
 .mini-clients-stack {
     display: flex;
     flex-direction: column;

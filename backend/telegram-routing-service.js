@@ -74,12 +74,13 @@ function createTelegramRoutingService({ telegramClient, forumGroupId, logger = c
     async function ensureUserExists({ telegramUserId, firstName, lastName, username }) {
         const existing = await get('SELECT telegram_id FROM users WHERE telegram_id = ?', [String(telegramUserId)]);
         if (existing) return;
+        const nowIso = new Date().toISOString();
         await run(
             `
-            INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance, topic_id)
-            VALUES (?, ?, ?, ?, '', 0, NULL)
+            INSERT INTO users (telegram_id, first_name, last_name, username, photo_url, bonus_balance, topic_id, first_seen_at)
+            VALUES (?, ?, ?, ?, '', 0, NULL, ?)
             `,
-            [String(telegramUserId), firstName || '', lastName || '', username || '']
+            [String(telegramUserId), firstName || '', lastName || '', username || '', nowIso]
         );
     }
 

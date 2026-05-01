@@ -28,6 +28,38 @@ function ensureColumn(table, column, definition) {
     });
 }
 
+/**
+ * first_seen_at: первое появление в боте. Не перезаписываем, если уже есть.
+ * Backfill: дата первого заказа (ORDER BY id ASC); иначе фиксированная метка миграции.
+ */
+async function backfillUsersFirstSeenAt(database) {
+    const migrationIso = new Date().toISOString();
+    await new Promise((resolve, reject) => {
+        database.run(
+            `
+            UPDATE users SET first_seen_at = (
+                SELECT o.created_at FROM orders o
+                WHERE TRIM(CAST(o.telegram_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                ORDER BY o.id ASC LIMIT 1
+            )
+            WHERE (first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = '')
+              AND EXISTS (
+                SELECT 1 FROM orders o2
+                WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+              )
+            `,
+            (err) => (err ? reject(err) : resolve())
+        );
+    });
+    await new Promise((resolve, reject) => {
+        database.run(
+            `UPDATE users SET first_seen_at = ? WHERE first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = ''`,
+            [migrationIso],
+            (err) => (err ? reject(err) : resolve())
+        );
+    });
+}
+
 db.serialize(() => {
     // users
     db.run(`
@@ -476,8 +508,10 @@ async function runAllMigrationsAsync() {
         await ensureColumn('users', 'broadcast_suppressed_at', 'TEXT');
         await ensureColumn('users', 'first_source_code', 'TEXT');
         await ensureColumn('users', 'last_source_code', 'TEXT');
+        await ensureColumn('users', 'first_seen_at', 'TEXT');
 
-        await ensureColumn('broadcast_campaigns', 'delivery_send_started_at', 'TEXT');
+        await backfillUsersFirstSeenAt(db);
+
         await ensureColumn('broadcast_campaigns', 'delivery_send_finished_at', 'TEXT');
         await ensureColumn('broadcast_campaigns', 'delivery_duration_ms', 'INTEGER');
         await ensureColumn('broadcast_campaigns', 'topic_test_mode', 'INTEGER DEFAULT 0');
