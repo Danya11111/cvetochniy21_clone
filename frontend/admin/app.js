@@ -1084,6 +1084,8 @@ function renderShell(contentHtml) {
     else if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
     else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
     else if (state.currentScreen === 'orders') headerBackAction = 'orders-back';
+    /** Вторую кнопку шапки не подписываем «Назад», если уже есть возврат по стеку (иначе две «Назад»). */
+    const headerStorefrontLabel = isDetailLike || headerBackAction ? 'К витрине' : 'Назад';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
         contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
@@ -1107,7 +1109,7 @@ function renderShell(contentHtml) {
                     </div>
                     <div class="admin-compact-header__toolbar" role="toolbar" aria-label="Действия шапки">
                         ${headerBackAction ? `<button type="button" class="header-action header-action--ghost header-action--sm" data-action="${esc(headerBackAction)}">Назад</button>` : ''}
-                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">${isDetailLike ? 'К витрине' : 'Назад'}</button>
+                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">${esc(headerStorefrontLabel)}</button>
                         <button type="button" class="header-action header-action--primary header-action--icon" data-action="reload-screen" title="Обновить" aria-label="Обновить данные">
                             <span class="header-action__glyph" aria-hidden="true">↻</span>
                         </button>
