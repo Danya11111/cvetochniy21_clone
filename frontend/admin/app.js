@@ -1,26 +1,15 @@
 const INIT_DATA_PARAM = 'tgWebAppData';
 const UI_STATE_KEY = 'admin_mobile_ui_state_v1';
-const SCREEN_IDS = [
+/** Экраны Mini App v2 (всё остальное — редирект на дашборд). */
+const MINI_APP_SCREEN_IDS = [
     'dashboard',
     'promo',
     'orders',
     'clients_new',
     'clients_all',
-    'client_card',
-    'home',
-    'actions',
-    'clients',
-    'client_detail',
-    'broadcasts',
-    'broadcast_detail',
-    'more',
-    'support',
-    'analytics',
-    'topics',
-    'system'
+    'client_card'
 ];
 
-/** Доступные из нижнего меню вкладки (Mini App v2). */
 const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
 
 const BOTTOM_NAV = [
@@ -31,21 +20,10 @@ const BOTTOM_NAV = [
 const SCREEN_META = {
     dashboard: { title: 'Админка', subtitle: '', nav: 'dashboard' },
     promo: { title: 'Продвижение', subtitle: 'Источники и кампании', nav: 'promo' },
-    home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
-    actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
     orders: { title: 'Заказы', subtitle: '', nav: 'dashboard' },
     clients_new: { title: 'Новые клиенты', subtitle: '', nav: 'dashboard' },
     clients_all: { title: 'Все клиенты', subtitle: '', nav: 'dashboard' },
-    client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' },
-    clients: { title: 'Клиенты', subtitle: 'Сегменты и LTV', nav: 'clients' },
-    client_detail: { title: 'Клиент', subtitle: 'Карточка', nav: 'clients' },
-    broadcasts: { title: 'Рассылки', subtitle: 'Кампании', nav: 'broadcasts' },
-    broadcast_detail: { title: 'Рассылка', subtitle: 'Детали кампании', nav: 'broadcasts' },
-    more: { title: 'Ещё', subtitle: 'Поддержка и сервис', nav: 'more' },
-    support: { title: 'Поддержка', subtitle: 'Очередь ответов', nav: 'more' },
-    analytics: { title: 'Аналитика', subtitle: 'Срезы', nav: 'more' },
-    topics: { title: 'Темы', subtitle: 'Темы клиентов', nav: 'more' },
-    system: { title: 'Система', subtitle: 'Состояние', nav: 'more' }
+    client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' }
 };
 
 /** Справка по метрикам дашборда v2 (тап для bottom-sheet на мобильных). */
@@ -147,7 +125,7 @@ const state = {
     dashboardPreset: 'today',
     dashboardRangeUiError: '',
     message: '',
-    /** @type {'clients_new'|'clients_all'|''} */
+    /** @type {'clients_new'|'clients_all'|'orders'|'dashboard'|''} */
     clientListReturnScreen: '',
     orderFilter: 'all',
     orderClientTelegramId: '',
@@ -230,6 +208,9 @@ function loadUiState() {
         });
     } catch (_) {}
     migrateDashboardDatesInState(saved);
+    if (!MINI_APP_SCREEN_IDS.includes(String(state.currentScreen || '').trim().toLowerCase())) {
+        state.currentScreen = BOTTOM_NAV_IDS.DASHBOARD;
+    }
 }
 
 function saveUiState() {
@@ -789,11 +770,34 @@ function buildTopicLink(chatId, threadId) {
 
 function resolveScreenFromHash() {
     const raw = String((location.hash || '').replace('#', '') || '').trim().toLowerCase();
-    const candidate = raw || 'dashboard';
-    if (SCREEN_IDS.includes(candidate)) {
-        return candidate;
+    const candidate = raw || BOTTOM_NAV_IDS.DASHBOARD;
+    if (!MINI_APP_SCREEN_IDS.includes(candidate)) {
+        if (raw) {
+            try {
+                const q = typeof location.search === 'string' ? location.search : '';
+                history.replaceState(null, '', `${location.pathname}${q}#${BOTTOM_NAV_IDS.DASHBOARD}`);
+            } catch (_) {
+                try {
+                    location.hash = BOTTOM_NAV_IDS.DASHBOARD;
+                } catch (_) {}
+            }
+        }
+        return BOTTOM_NAV_IDS.DASHBOARD;
     }
-    return BOTTOM_NAV_IDS.DASHBOARD;
+    return candidate;
+}
+
+function navigateToClientCardV2(telegramId, returnScreen) {
+    const id = String(telegramId || '').trim();
+    if (!id) return;
+    state.selectedClientId = id;
+    const r = String(returnScreen || '').trim().toLowerCase();
+    if (r === 'clients_all') state.clientListReturnScreen = 'clients_all';
+    else if (r === 'orders') state.clientListReturnScreen = 'orders';
+    else if (r === 'dashboard') state.clientListReturnScreen = 'dashboard';
+    else state.clientListReturnScreen = 'clients_new';
+    delete state.clientV2DetailById[id];
+    navigateTo('client_card');
 }
 
 function resolveStorefrontReturnPath() {
@@ -824,7 +828,7 @@ function returnToStorefront() {
 
 function navigateTo(screenId) {
     let next = String(screenId || '').trim().toLowerCase();
-    if (!SCREEN_IDS.includes(next)) {
+    if (!MINI_APP_SCREEN_IDS.includes(next)) {
         next = BOTTOM_NAV_IDS.DASHBOARD;
     }
     if (location.hash !== `#${next}`) {
@@ -1071,33 +1075,19 @@ function compactChartCard(rows, title, valueKey = 'value') {
 }
 
 function renderShell(contentHtml) {
-    const meta = SCREEN_META[state.currentScreen] || SCREEN_META.home;
+    const meta = SCREEN_META[state.currentScreen] || SCREEN_META.dashboard;
     const adminName = adminConfig && adminConfig.admin ? `${adminConfig.admin.name} · ${adminConfig.admin.adminId}` : '';
     const navBase = meta.nav;
-    const isDetailLike =
-        state.currentScreen === 'client_detail' ||
-        state.currentScreen === 'broadcast_detail' ||
-        state.currentScreen === 'client_card';
+    const isDetailLike = state.currentScreen === 'client_card';
     let headerBackAction = '';
-    if (state.currentScreen === 'client_detail') headerBackAction = 'client-back';
-    else if (state.currentScreen === 'broadcast_detail') headerBackAction = 'broadcast-back';
-    else if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
+    if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
     else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
     else if (state.currentScreen === 'orders') headerBackAction = 'orders-back';
-    /** Вторую кнопку шапки не подписываем «Назад», если уже есть возврат по стеку (иначе две «Назад»). */
-    const headerStorefrontLabel = isDetailLike || headerBackAction ? 'К витрине' : 'Назад';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
         contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
-    } else if (state.currentScreen === 'clients') {
-        contextHint = state.clientFilter === 'all' ? 'Все клиенты' : `Сегмент: ${state.clientFilter}`;
-    } else if (state.currentScreen === 'broadcasts') {
-        contextHint = state.broadcastsFilter === 'all' ? 'Все кампании' : `Срез: ${state.broadcastsFilter}`;
-    } else if (state.currentScreen === 'support') {
-        contextHint = state.supportFilter === 'all' ? 'Все диалоги' : `Срез: ${state.supportFilter}`;
-    } else if (state.currentScreen === 'analytics') {
-        contextHint = `Период: ${state.analyticsPeriod}`;
     }
+    const headerStorefrontLabel = isDetailLike || headerBackAction ? 'К витрине' : 'Назад';
     const refreshedAtLabel = formatTime(state.lastRefreshedAt || new Date().toISOString());
     return `
         <main class="admin-shell admin-app-shell">
@@ -1541,7 +1531,6 @@ async function renderClientCardV2Screen() {
             <div class="client-v2-k">Сумма</div><div class="client-v2-v">${pillSum}</div>
             <div class="client-v2-k">Бонусы</div><div class="client-v2-v">${bonus}</div>
         </div>
-        <button type="button" class="client-v2-fullprof" data-action="client-open-full-profile">Открыть карточку пользователя</button>
     </div>`;
 }
 
@@ -3208,18 +3197,7 @@ async function renderScreenContent() {
     if (state.currentScreen === 'clients_new') return renderClientsNewScreen();
     if (state.currentScreen === 'clients_all') return renderClientsAllScreen();
     if (state.currentScreen === 'client_card') return renderClientCardV2Screen();
-    if (state.currentScreen === 'home') return renderHomeScreen();
-    if (state.currentScreen === 'actions') return renderActionsScreen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
-    if (state.currentScreen === 'clients') return renderClientsScreen();
-    if (state.currentScreen === 'client_detail') return renderClientDetailScreen();
-    if (state.currentScreen === 'broadcasts') return renderBroadcastsScreen();
-    if (state.currentScreen === 'broadcast_detail') return renderBroadcastDetailScreen();
-    if (state.currentScreen === 'more') return renderMoreScreen();
-    if (state.currentScreen === 'support') return renderSupportScreen();
-    if (state.currentScreen === 'analytics') return renderAnalyticsScreen();
-    if (state.currentScreen === 'topics') return renderTopicsScreen();
-    if (state.currentScreen === 'system') return renderSystemScreen();
     return renderDashboardV2Screen();
 }
 
@@ -3282,16 +3260,6 @@ async function openOrderDetail(orderId) {
         const data = (await api(`/api/admin/orders/${id}`)).data;
         state.orderDetails[id] = data;
     }
-}
-
-async function openClientDetail(telegramId) {
-    const id = String(telegramId || '');
-    if (!id) return;
-    if (!state.clientDetails[id]) {
-        const data = (await api(`/api/admin/clients/${encodeURIComponent(id)}`)).data;
-        state.clientDetails[id] = data;
-    }
-    state.selectedClientId = id;
 }
 
 async function openSupportDetail(threadId) {
@@ -3420,21 +3388,15 @@ async function handleAction(action, value, eventTarget) {
         return;
     }
     if (action === 'client-card-back') {
-        navigateTo(state.clientListReturnScreen === 'clients_all' ? 'clients_all' : 'clients_new');
+        const ret = String(state.clientListReturnScreen || '').trim().toLowerCase();
+        if (ret === 'clients_all') navigateTo('clients_all');
+        else if (ret === 'orders') navigateTo('orders');
+        else if (ret === 'dashboard') navigateTo('dashboard');
+        else navigateTo('clients_new');
         return;
     }
     if (action === 'mini-stack-back') {
         navigateTo('dashboard');
-        return;
-    }
-    if (action === 'client-open-full-profile') {
-        const id = String(state.selectedClientId || '').trim();
-        if (!id) return;
-        state.clientsContextFilter = state.clientFilter;
-        state.clientsContextQ = state.clientsQ;
-        state.clientDetailTab = 'orders';
-        await openClientDetail(id);
-        navigateTo('client_detail');
         return;
     }
     if (action === 'dashboard-apply-range') {
@@ -3548,25 +3510,16 @@ async function handleAction(action, value, eventTarget) {
     }
     if (action === 'order-open-client') {
         const clientId = String(value || '').trim();
-        state.clientsContextFilter = state.clientFilter;
-        state.clientsContextQ = state.clientsQ;
-        state.clientDetailTab = 'orders';
-        await openClientDetail(clientId);
-        navigateTo('client_detail');
+        if (!clientId) return;
+        navigateToClientCardV2(clientId, 'orders');
         return;
     }
     if (action === 'client-open') {
-        state.clientsContextFilter = state.clientFilter;
-        state.clientsContextQ = state.clientsQ;
-        state.clientDetailTab = 'orders';
-        await openClientDetail(value);
-        navigateTo('client_detail');
+        navigateToClientCardV2(value, 'clients_all');
         return;
     }
     if (action === 'client-back') {
-        state.clientFilter = state.clientsContextFilter || 'all';
-        state.clientsQ = state.clientsContextQ || '';
-        navigateTo('clients');
+        navigateTo('dashboard');
         return;
     }
     if (action === 'client-open-orders') {
@@ -3576,17 +3529,13 @@ async function handleAction(action, value, eventTarget) {
         return;
     }
     if (action === 'client-open-support') {
-        state.supportClientTelegramId = String(value || '').trim();
-        state.supportFilter = 'all';
-        navigateTo('support');
+        navigateTo('dashboard');
         return;
     }
     if (action === 'support-open-client') {
         const clientId = String(value || '').trim();
         if (!clientId) return;
-        state.clientDetailTab = 'support';
-        await openClientDetail(clientId);
-        navigateTo('client_detail');
+        navigateToClientCardV2(clientId, 'dashboard');
         return;
     }
     if (action === 'support-open') {
@@ -3673,11 +3622,11 @@ async function handleAction(action, value, eventTarget) {
             : '';
         state.activePlaybook = null;
         saveUiState();
-        if (source && SCREEN_IDS.includes(source)) {
+        if (source && MINI_APP_SCREEN_IDS.includes(source)) {
             navigateTo(source);
             return;
         }
-        navigateTo('actions');
+        navigateTo('dashboard');
         return;
     }
     if (action === 'save-flags') {

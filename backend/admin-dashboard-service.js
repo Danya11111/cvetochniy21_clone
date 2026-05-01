@@ -16,6 +16,27 @@ const {
 const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
 const CANCELLED_SQL_O = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
 
+/**
+ * Подзапрос: one row per клиент — telegram_id (нормализованная строка) и first_order_at.
+ * Период: первый заказ попадает в [param1, param2] по календарному времени (как в SQLite).
+ * Используем julianday: лексикографическое сравнение TEXT ломается на 'YYYY-MM-DD HH:MM:SS' vs '…T…Z'.
+ */
+function getSqlNewClientsFirstOrderInRangeSubquery() {
+    return `
+        SELECT
+            TRIM(CAST(telegram_id AS TEXT)) AS telegram_id,
+            MIN(created_at) AS first_order_at
+        FROM orders
+        WHERE telegram_id IS NOT NULL
+          AND TRIM(CAST(telegram_id AS TEXT)) <> ''
+          AND created_at IS NOT NULL
+          AND TRIM(COALESCE(created_at, '')) <> ''
+        GROUP BY TRIM(CAST(telegram_id AS TEXT))
+        HAVING julianday(MIN(created_at)) >= julianday(?)
+           AND julianday(MIN(created_at)) <= julianday(?)
+    `;
+}
+
 function dbGet(sql, params = []) {
     return new Promise((resolve, reject) => {
         db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
@@ -420,15 +441,7 @@ async function fetchDashboardMetricsForRange(range) {
             []
         ),
         dbGet(
-            `
-            SELECT COUNT(*) AS c
-            FROM (
-                SELECT telegram_id
-                FROM orders
-                GROUP BY telegram_id
-                HAVING MIN(created_at) >= ? AND MIN(created_at) <= ?
-            ) t
-            `,
+            `SELECT COUNT(*) AS c FROM (${getSqlNewClientsFirstOrderInRangeSubquery()}) nc`,
             [periodStartIso, periodEndIso]
         ),
         dbGet(`SELECT COUNT(*) AS c FROM users`, []),
@@ -620,6 +633,7 @@ module.exports = {
     fetchDashboardMetrics,
     getDashboardV2ApiPayload,
     formatRuDate,
+    getSqlNewClientsFirstOrderInRangeSubquery,
     mergeDashboardSourcesForApi,
     fetchDashboardSourcesForRange,
     DASHBOARD_SYSTEM_NONE_CODE

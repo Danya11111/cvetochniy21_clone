@@ -2123,24 +2123,6 @@ button.dashboard-v2__dash-row {
     color: var(--text-main);
 }
 
-.client-v2-fullprof {
-    display: block;
-    width: 100%;
-    padding: 14px 16px;
-    border: none;
-    border-radius: var(--radius-md);
-    background: var(--brand-600, #5e7256);
-    color: #fff;
-    font-size: 16px;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: var(--shadow-card);
-}
-
-.client-v2-fullprof:active {
-    opacity: 0.94;
-}
-
 .promo-stub__text {
     margin: 0;
     font-size: var(--font-body);

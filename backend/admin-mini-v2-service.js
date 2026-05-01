@@ -8,7 +8,8 @@ const db = require('./db');
 const {
     getDashboardPeriodRange,
     getCustomDashboardPeriodRange,
-    getAllTimeDashboardPeriodRange
+    getAllTimeDashboardPeriodRange,
+    getSqlNewClientsFirstOrderInRangeSubquery
 } = require('./admin-dashboard-service');
 const { orderPaidRevenueKopecksFromRow, kopecksToWholeRub, sqlOrderPaidRevenueKopecks } = require('./money');
 
@@ -88,6 +89,7 @@ async function listOrdersV2ForRange(range) {
 
 async function listClientsNewForRange(range) {
     const revExpr = sqlOrderPaidRevenueKopecks('ox');
+    const newSub = getSqlNewClientsFirstOrderInRangeSubquery();
     const rows = await dbAll(
         `
         SELECT
@@ -100,25 +102,21 @@ async function listClientsNewForRange(range) {
             u.last_source_code,
             COALESCE(u.bonus_balance, 0) AS bonus_balance,
             (SELECT op.phone FROM orders op
-             WHERE op.telegram_id = x.telegram_id AND TRIM(COALESCE(op.phone,'')) <> ''
+             WHERE TRIM(CAST(op.telegram_id AS TEXT)) = x.telegram_id AND TRIM(COALESCE(op.phone,'')) <> ''
              ORDER BY op.id DESC LIMIT 1) AS phone_hint,
             COALESCE(oc.total_orders, 0) AS total_orders,
             COALESCE(oc.paid_orders, 0) AS paid_orders,
             COALESCE(oc.total_revenue, 0) AS total_revenue
-        FROM (
-            SELECT telegram_id, MIN(created_at) AS first_order_at
-            FROM orders
-            GROUP BY telegram_id
-            HAVING MIN(created_at) >= ? AND MIN(created_at) <= ?
-        ) x
+        FROM (${newSub}) x
         LEFT JOIN users u ON u.telegram_id = x.telegram_id
         LEFT JOIN (
-            SELECT ox.telegram_id,
+            SELECT TRIM(CAST(ox.telegram_id AS TEXT)) AS telegram_id,
                 COUNT(*) AS total_orders,
                 SUM(CASE WHEN (${PAID_SQL_OX}) THEN 1 ELSE 0 END) AS paid_orders,
                 COALESCE(SUM((${revExpr})), 0) AS total_revenue
             FROM orders ox
-            GROUP BY ox.telegram_id
+            WHERE ox.telegram_id IS NOT NULL AND TRIM(CAST(ox.telegram_id AS TEXT)) <> ''
+            GROUP BY TRIM(CAST(ox.telegram_id AS TEXT))
         ) oc ON oc.telegram_id = x.telegram_id
         ORDER BY x.first_order_at DESC, x.telegram_id DESC
         LIMIT 500
