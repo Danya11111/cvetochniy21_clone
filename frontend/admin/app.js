@@ -21,11 +21,10 @@ const SCREEN_IDS = [
 ];
 
 /** Доступные из нижнего меню вкладки (Mini App v2). */
-const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', ORDERS: 'orders', PROMO: 'promo' });
+const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
 
 const BOTTOM_NAV = [
     { id: BOTTOM_NAV_IDS.DASHBOARD, label: 'Дашборд' },
-    { id: BOTTOM_NAV_IDS.ORDERS, label: 'Заказы' },
     { id: BOTTOM_NAV_IDS.PROMO, label: 'Продвижение' }
 ];
 
@@ -34,7 +33,7 @@ const SCREEN_META = {
     promo: { title: 'Продвижение', subtitle: 'Источники и кампании', nav: 'promo' },
     home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
     actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
-    orders: { title: 'Заказы', subtitle: '', nav: 'orders' },
+    orders: { title: 'Заказы', subtitle: '', nav: 'dashboard' },
     clients_new: { title: 'Новые клиенты', subtitle: '', nav: 'dashboard' },
     clients_all: { title: 'Все клиенты', subtitle: '', nav: 'dashboard' },
     client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' },
@@ -1084,6 +1083,7 @@ function renderShell(contentHtml) {
     else if (state.currentScreen === 'broadcast_detail') headerBackAction = 'broadcast-back';
     else if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
     else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
+    else if (state.currentScreen === 'orders') headerBackAction = 'orders-back';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
         contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
@@ -1218,10 +1218,11 @@ function buildClientsNewV2RequestPath() {
 
 function renderMiniMetricCell(label, value, danger = false, tipId = '', navAction = '') {
     const dm = danger ? ' dashboard-v2__metric-cell--danger' : '';
+    const tap = navAction ? ' dashboard-v2__metric-cell--tap' : '';
     const val = typeof value === 'string' ? value : esc(String(value ?? ''));
     if (navAction) {
         return `
-        <button type="button" class="dashboard-v2__metric-cell${dm}" data-action="${esc(navAction)}" aria-label="${esc(label)}">
+        <button type="button" class="dashboard-v2__metric-cell${dm}${tap}" data-action="${esc(navAction)}" aria-label="${esc(`${label}, открыть`)}">
             <span class="dashboard-v2__metric-label">${esc(label)}</span>
             <span class="dashboard-v2__metric-value">${val}</span>
         </button>`;
@@ -1310,6 +1311,31 @@ async function renderDashboardV2Screen() {
 
     const revenueEscaped = esc(formatKopecksAsRub(m.revenueKopecks));
 
+    const dashSources = Array.isArray(payload.sources) ? payload.sources : [];
+    const sourcesBlockInner =
+        dashSources.length === 0
+            ? `<div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>`
+            : dashSources
+                  .map((s) => {
+                      const title = esc(String((s && s.title) || (s && s.code) || ''));
+                      const clicks = formatNum(Number(s && s.clicks) || 0);
+                      const ord = formatNum(Number(s && s.ordersCount) || 0);
+                      const paid = formatNum(Number(s && s.paidOrdersCount) || 0);
+                      const rev = esc(formatKopecksAsRub(Number(s && s.revenueKopecks) || 0));
+                      const sys = s && (s.isSystem === true || s.code === '__none__');
+                      if (sys) {
+                          return `<div class="dashboard-v2__source-row dashboard-v2__source-row--system">
+                <div class="dashboard-v2__source-name">${title}</div>
+                <div class="dashboard-v2__source-meta">Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
+            </div>`;
+                      }
+                      return `<div class="dashboard-v2__source-row">
+                <div class="dashboard-v2__source-name">${title}</div>
+                <div class="dashboard-v2__source-meta">Переходы: ${clicks} · Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
+            </div>`;
+                  })
+                  .join('');
+
     return `
         <div class="dashboard-v2 screen-enter">
             ${uiErrBanner}
@@ -1349,7 +1375,7 @@ async function renderDashboardV2Screen() {
                 </button>
 
                 <section class="dashboard-v2__grid4" aria-label="Ключевые метрики">
-                    ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount), false, 'orders_count')}
+                    ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount), false, '', 'dashboard-open-orders')}
                     ${renderMiniMetricCell('Ср. чек', formatKopecksAsRub(m.averageCheckKopecks), false, 'avg_check')}
                     ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount), false, '', 'dashboard-open-new-clients')}
                     ${renderMiniMetricCell('Все клиенты', formatNum(m.clientsTotalCount), false, '', 'dashboard-open-all-clients')}
@@ -1382,9 +1408,7 @@ async function renderDashboardV2Screen() {
                 <span class="dashboard-v2__subhead">Лучшие источники заказов</span>
                 <span class="dashboard-v2__subhead-hint" aria-hidden="true">?</span>
             </button>
-            <article class="dashboard-v2__card dashboard-v2__card--muted">
-                <div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>
-            </article>
+            <article class="dashboard-v2__card dashboard-v2__card--muted dashboard-v2__card--sources">${sourcesBlockInner}</article>
         </div>`;
 }
 
@@ -1568,26 +1592,34 @@ async function renderPromoScreen() {
 
     function renderSourceRow(r) {
         const code = String(r.code || '');
+        const isSystem = r.is_system === true || code === '__none__';
         const expanded = !!state.promoExpandedSources[code];
         const d = expanded ? state.promoDetailByCode[code] : null;
         const listClicks = Number(r.clicks_count || 0);
         const listPaid = Number(r.paid_orders_count || 0);
+        const listOrd = Number(r.orders_count != null ? r.orders_count : 0);
         const listRevStr = esc(formatKopecksAsRub(r.paid_revenue_kopecks || 0));
         const url = String(r.tracking_url || '').trim();
+        const metricsLine = isSystem
+            ? `Заказов: ${formatNum(listOrd)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`
+            : `Переходы: ${formatNum(listClicks)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}`;
+        const chipOrPill = isSystem
+            ? `<span class="promo-row__sys-pill" aria-hidden="true">системный</span>`
+            : `<span class="promo-code-chip mono promo-code-chip--src">${esc(code)}</span>`;
         const head = `
-            <button type="button" class="promo-row promo-row--src${expanded ? ' promo-row--open' : ''}"
+            <button type="button" class="promo-row promo-row--src${isSystem ? ' promo-row--system' : ''}${expanded ? ' promo-row--open' : ''}"
                 aria-expanded="${expanded ? 'true' : 'false'}"
                 data-action="promo-src-toggle"
                 data-code="${esc(code)}">
                 <span class="promo-row__title promo-row__title--src">${esc(String(r.title || code))}</span>
-                <span class="promo-row__metrics promo-row__metrics--src">Переходы: ${formatNum(listClicks)} · Оплат: ${formatNum(listPaid)} · ${listRevStr}</span>
-                <span class="promo-code-chip mono promo-code-chip--src">${esc(code)}</span>
+                <span class="promo-row__metrics promo-row__metrics--src">${metricsLine}</span>
+                ${chipOrPill}
             </button>`;
         if (!expanded) return `<div class="promo-row-wrap">${head}</div>`;
         const fullUrl = url || (d && String(d.tracking_url || '').trim()) || '';
         const clicksN = Number((d || r).clicks_count ?? listClicks ?? 0);
         const paidDetail = Number((d || r).paid_orders_count ?? listPaid ?? 0);
-        const createdN = Number(d?.created_orders_count ?? 0);
+        const createdN = Number((d || r).created_orders_count ?? r.orders_count ?? 0);
         const sumStr = esc(formatKopecksAsRub((d || r).paid_revenue_kopecks ?? r.paid_revenue_kopecks ?? 0));
         const kvRow = (label, numHtml) =>
             `<div class="promo-src-kv-row">
@@ -1600,17 +1632,25 @@ async function renderPromoScreen() {
                 <span class="promo-src-kv-row__lead" aria-hidden="true"></span>
                 <span class="promo-src-kv-row__val">${sumStr}</span>
             </div>`;
-        const detailMetrics = `
-            <div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
+        const detailMetrics = isSystem
+            ? `<div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
+                ${kvRow('Создано заказов', formatNum(createdN))}
+                ${kvRow('Оплаченных заказов', formatNum(paidDetail))}
+                ${kvRubRow}
+            </div>`
+            : `<div class="promo-src-kv-stack" role="group" aria-label="Метрики источника">
                 ${kvRow('Переходы', formatNum(clicksN))}
                 ${kvRow('Создано заказов', formatNum(createdN))}
                 ${kvRow('Оплаченных заказов', formatNum(paidDetail))}
                 ${kvRubRow}
             </div>`;
-        const noUrlFoot = fullUrl
+        const noUrlFoot =
+            isSystem || fullUrl
+                ? ''
+                : `<p class="promo-muted promo-muted--src-foot">Ссылка будет доступна после настройки username бота.</p>`;
+        const actionsHtml = isSystem
             ? ''
-            : `<p class="promo-muted promo-muted--src-foot">Ссылка будет доступна после настройки username бота.</p>`;
-        const actionsHtml = `<div class="promo-src-actions${fullUrl ? '' : ' promo-src-actions--solo'}">
+            : `<div class="promo-src-actions${fullUrl ? '' : ' promo-src-actions--solo'}">
                 ${fullUrl ? `<button type="button" class="promo-src-btn promo-src-btn--secondary" data-action="promo-copy" data-copy="${esc(fullUrl)}">Скопировать ссылку</button>` : ''}
                 <button type="button" class="promo-src-btn promo-src-btn--danger" data-action="promo-src-delete-prompt" data-code="${esc(code)}">Удалить</button>
             </div>`;
@@ -3348,6 +3388,14 @@ async function handleAction(action, value, eventTarget) {
         state.dashboardPreset = 'all';
         state.dashboardRangeUiError = '';
         await renderApp();
+        return;
+    }
+    if (action === 'dashboard-open-orders') {
+        navigateTo('orders');
+        return;
+    }
+    if (action === 'orders-back') {
+        navigateTo('dashboard');
         return;
     }
     if (action === 'dashboard-open-new-clients') {

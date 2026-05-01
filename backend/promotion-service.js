@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const { sqlOrderPaidRevenueKopecks } = require('./money');
 
 const START_PREFIX = 'src_';
+/** Зарезервировано: псевдо-источник «заказы без source_code» (нет в promotion_sources). */
+const PROMOTION_SYSTEM_NONE_CODE = '__none__';
 const MAX_TITLE_LEN = 120;
 const MAX_CODE_LEN = 64;
 const MAX_BROADCAST_BODY = 4096;
@@ -125,6 +127,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     async function recordSourceClickFromStart(message, startPayload) {
         const code = parseSourceCodeFromStartPayload(startPayload);
         if (!code) return { recorded: false };
+        if (code === PROMOTION_SYSTEM_NONE_CODE) return { recorded: false };
 
         const src = await dbGet(
             db,
@@ -257,7 +260,8 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
             const paidAgg = await dbGet(
                 db,
                 `SELECT
-                    COUNT(*) AS paid_orders,
+                    COUNT(*) AS orders_total,
+                    SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
                     COALESCE(SUM((${revExpr})), 0) AS revenue_k
                  FROM orders o
                  WHERE o.source_code = ?`,
@@ -276,11 +280,43 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
                 created_at: r.created_at,
                 created_by_telegram_id: r.created_by_telegram_id,
                 is_active: Number(r.is_active) !== 0,
+                is_system: false,
                 clicks_count: Number(r.clicks_count || 0),
                 unique_users_count: Number(r.unique_users_count || 0),
+                orders_count: Math.round(Number(paidAgg?.orders_total || 0)),
                 paid_orders_count: Math.round(Number(paidAgg?.paid_orders || 0)),
                 paid_revenue_kopecks: Math.round(Number(paidAgg?.revenue_k || 0)),
                 tracking_url: url
+            });
+        }
+
+        const noneOrd = await dbGet(
+            db,
+            `SELECT
+                COUNT(*) AS created_orders,
+                SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
+                COALESCE(SUM((${revExpr})), 0) AS revenue_k
+             FROM orders o
+             WHERE o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''`
+        );
+        const noneCreated = Math.round(Number(noneOrd?.created_orders || 0));
+        const nonePaid = Math.round(Number(noneOrd?.paid_orders || 0));
+        const noneRev = Math.round(Number(noneOrd?.revenue_k || 0));
+        if (noneCreated > 0 || nonePaid > 0 || noneRev > 0) {
+            out.push({
+                id: null,
+                code: PROMOTION_SYSTEM_NONE_CODE,
+                title: 'Без источника',
+                created_at: null,
+                created_by_telegram_id: null,
+                is_active: true,
+                is_system: true,
+                clicks_count: 0,
+                unique_users_count: 0,
+                orders_count: noneCreated,
+                paid_orders_count: nonePaid,
+                paid_revenue_kopecks: noneRev,
+                tracking_url: ''
             });
         }
         return out;
@@ -289,6 +325,29 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     async function getSourceDetail(code) {
         const c = safeTrackingCode(code);
         if (!c) return null;
+        if (c === PROMOTION_SYSTEM_NONE_CODE) {
+            const revExpr = sqlOrderPaidRevenueKopecks('o');
+            const ord = await dbGet(
+                db,
+                `SELECT
+                    COUNT(*) AS created_orders,
+                    SUM(CASE WHEN (${revExpr}) > 0 THEN 1 ELSE 0 END) AS paid_orders,
+                    COALESCE(SUM((${revExpr})), 0) AS revenue_k
+                 FROM orders o
+                 WHERE o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''`
+            );
+            return {
+                code: PROMOTION_SYSTEM_NONE_CODE,
+                title: 'Без источника',
+                is_system: true,
+                clicks_count: 0,
+                unique_users_count: 0,
+                created_orders_count: Math.round(Number(ord?.created_orders || 0)),
+                paid_orders_count: Math.round(Number(ord?.paid_orders || 0)),
+                paid_revenue_kopecks: Math.round(Number(ord?.revenue_k || 0)),
+                tracking_url: ''
+            };
+        }
         const s = await dbGet(
             db,
             'SELECT * FROM promotion_sources WHERE code = ? AND COALESCE(is_active, 1) = 1',
@@ -325,6 +384,7 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
 
         return {
             ...s,
+            is_system: false,
             clicks_count: Number(clicks?.c || 0),
             unique_users_count: Number(uniq?.c || 0),
             created_orders_count: Math.round(Number(ord?.created_orders || 0)),
@@ -343,6 +403,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
         }
         let base = codeInput != null && String(codeInput).trim() ? safeTrackingCode(codeInput) : slugFromTitle(t);
         if (!base) base = `src_${Date.now()}`;
+        if (base === PROMOTION_SYSTEM_NONE_CODE) {
+            const e = new Error('RESERVED_SOURCE_CODE');
+            e.code = 'RESERVED_SOURCE_CODE';
+            throw e;
+        }
         const code = await ensureUniqueCode(base);
         const now = new Date().toISOString();
         const cid = String(createdByTgId || '').trim() || null;
@@ -368,6 +433,11 @@ function createPromotionService({ db, config, runtimeBotProfile = null }) {
     async function deactivateSource(codeRaw) {
         const c = safeTrackingCode(codeRaw);
         if (!c) {
+            const err = new Error('NOT_FOUND');
+            err.code = 'NOT_FOUND';
+            throw err;
+        }
+        if (c === PROMOTION_SYSTEM_NONE_CODE) {
             const err = new Error('NOT_FOUND');
             err.code = 'NOT_FOUND';
             throw err;

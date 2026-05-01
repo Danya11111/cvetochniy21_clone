@@ -1648,6 +1648,18 @@ button.dashboard-v2__metric-cell {
     background: rgba(194, 65, 51, 0.06);
 }
 
+/* Открытие вложенных экранов (заказы, клиенты) — лёгкий акцент кликабельности */
+.dashboard-v2__metric-cell--tap {
+    cursor: pointer;
+}
+
+@media (hover: hover) {
+    .dashboard-v2__metric-cell--tap:hover {
+        border-color: rgba(94, 114, 86, 0.35);
+        box-shadow: 0 3px 12px rgba(32, 36, 30, 0.09);
+    }
+}
+
 .dashboard-v2__metric-label {
     display: block;
     font-size: var(--font-meta);
@@ -1781,6 +1793,40 @@ button.dashboard-v2__dash-row {
 
 .dashboard-v2__card--muted {
     background: var(--surface-elevated);
+}
+
+.dashboard-v2__card--sources {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: var(--space-3);
+}
+
+.dashboard-v2__source-row {
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+}
+
+.dashboard-v2__source-row--system {
+    border-style: dashed;
+    opacity: 0.97;
+}
+
+.dashboard-v2__source-name {
+    font-size: 14px;
+    font-weight: 650;
+    color: var(--text-main);
+    line-height: 1.3;
+    margin-bottom: 4px;
+}
+
+.dashboard-v2__source-meta {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-soft);
+    font-variant-numeric: tabular-nums;
 }
 
 .dashboard-v2__top-row {
@@ -2558,6 +2604,23 @@ button.dashboard-v2__dash-row {
     gap: 2px;
     padding: var(--space-2) var(--space-3);
     min-height: var(--tap-min);
+}
+
+.promo-row--system {
+    border: 1px dashed var(--line);
+    background: var(--surface-elevated);
+}
+
+.promo-row__sys-pill {
+    display: inline-block;
+    margin-top: 1px;
+    padding: 2px 7px;
+    font-size: 10px;
+    font-weight: 650;
+    border-radius: 6px;
+    background: var(--brand-soft);
+    color: var(--brand-700);
+    text-transform: lowercase;
 }
 
 .promo-row__title--src {

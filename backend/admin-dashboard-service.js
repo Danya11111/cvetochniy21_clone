@@ -227,6 +227,141 @@ function aggregateTopProductsFromOrders(orderRows) {
     return [...acc.values()].sort((a, b) => b.qty - a.qty).slice(0, 10);
 }
 
+/** Системный псевдо-источник в отчётах: заказы без `orders.source_code`. */
+const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
+const DASHBOARD_SYSTEM_NONE_TITLE = 'Без источника';
+const DASHBOARD_TOP_SOURCES_LIMIT = 5;
+
+/**
+ * Сборка списка «Лучшие источники» для dashboard-v2 (чистая функция — удобно для тестов).
+ * @param {Array<{code?: string, clicks?: number, c?: number}>} clickRows
+ * @param {Array<{code?: string, orders_count?: number, paid_orders_count?: number, revenue_kopecks?: number}>} orderRows
+ * @param {Array<{code?: string, title?: string}>} promoTitleRows
+ */
+function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
+    const titleByCode = new Map(
+        (promoTitleRows || []).map((r) => {
+            const code = String(r.code || '').trim();
+            return [code, String(r.title || code || '').trim() || code];
+        })
+    );
+
+    /** @type {Map<string, number>} */
+    const clickMap = new Map();
+    for (const r of clickRows || []) {
+        const code = String(r.code || '').trim();
+        if (!code) continue;
+        clickMap.set(code, Math.round(Number(r.clicks != null ? r.clicks : r.c || 0)));
+    }
+
+    /** @type {Map<string, { ordersCount: number, paidOrdersCount: number, revenueKopecks: number }>} */
+    const orderMap = new Map();
+    for (const r of orderRows || []) {
+        const codeRaw = String(r.code || '').trim();
+        const code = codeRaw || DASHBOARD_SYSTEM_NONE_CODE;
+        orderMap.set(code, {
+            ordersCount: Math.round(Number(r.orders_count || 0)),
+            paidOrdersCount: Math.round(Number(r.paid_orders_count || 0)),
+            revenueKopecks: Math.round(Number(r.revenue_kopecks || 0))
+        });
+    }
+
+    /** @type {Set<string>} */
+    const codes = new Set();
+    for (const c of titleByCode.keys()) {
+        if (c && c !== DASHBOARD_SYSTEM_NONE_CODE) codes.add(c);
+    }
+    for (const c of clickMap.keys()) {
+        if (c && c !== DASHBOARD_SYSTEM_NONE_CODE) codes.add(c);
+    }
+    for (const c of orderMap.keys()) {
+        if (c && c !== DASHBOARD_SYSTEM_NONE_CODE) codes.add(c);
+    }
+
+    /** @type {Array<{ code: string, title: string, clicks: number, ordersCount: number, paidOrdersCount: number, revenueKopecks: number, isSystem: boolean }>} */
+    const out = [];
+
+    for (const code of codes) {
+        const clicks = clickMap.get(code) || 0;
+        const o = orderMap.get(code) || { ordersCount: 0, paidOrdersCount: 0, revenueKopecks: 0 };
+        if (clicks === 0 && o.ordersCount === 0 && o.paidOrdersCount === 0 && o.revenueKopecks === 0) continue;
+
+        const title = titleByCode.get(code) || code;
+        out.push({
+            code,
+            title,
+            clicks,
+            ordersCount: o.ordersCount,
+            paidOrdersCount: o.paidOrdersCount,
+            revenueKopecks: o.revenueKopecks,
+            isSystem: false
+        });
+    }
+
+    const noneO = orderMap.get(DASHBOARD_SYSTEM_NONE_CODE);
+    if (
+        noneO &&
+        (noneO.ordersCount > 0 || noneO.paidOrdersCount > 0 || noneO.revenueKopecks > 0)
+    ) {
+        out.push({
+            code: DASHBOARD_SYSTEM_NONE_CODE,
+            title: DASHBOARD_SYSTEM_NONE_TITLE,
+            clicks: 0,
+            ordersCount: noneO.ordersCount,
+            paidOrdersCount: noneO.paidOrdersCount,
+            revenueKopecks: noneO.revenueKopecks,
+            isSystem: true
+        });
+    }
+
+    out.sort((a, b) => {
+        if (b.revenueKopecks !== a.revenueKopecks) return b.revenueKopecks - a.revenueKopecks;
+        if (b.paidOrdersCount !== a.paidOrdersCount) return b.paidOrdersCount - a.paidOrdersCount;
+        if (b.ordersCount !== a.ordersCount) return b.ordersCount - a.ordersCount;
+        return b.clicks - a.clicks;
+    });
+
+    return out.slice(0, DASHBOARD_TOP_SOURCES_LIMIT);
+}
+
+async function fetchDashboardSourcesForRange(range) {
+    const { periodStartIso, periodEndIso } = range;
+    const revExpr = sqlOrderPaidRevenueKopecks('o');
+    const noneParam = DASHBOARD_SYSTEM_NONE_CODE;
+
+    const [clickRows, orderRows, promoTitleRows] = await Promise.all([
+        dbAll(
+            `
+            SELECT TRIM(source_code) AS code, COUNT(*) AS clicks
+            FROM promotion_source_clicks
+            WHERE clicked_at >= ? AND clicked_at <= ?
+            GROUP BY TRIM(source_code)
+            `,
+            [periodStartIso, periodEndIso]
+        ),
+        dbAll(
+            `
+            SELECT
+                CASE
+                    WHEN o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''
+                    THEN ?
+                    ELSE TRIM(o.source_code)
+                END AS code,
+                COUNT(*) AS orders_count,
+                SUM(CASE WHEN (${PAID_SQL_O}) THEN 1 ELSE 0 END) AS paid_orders_count,
+                COALESCE(SUM(CASE WHEN (${PAID_SQL_O}) THEN (${revExpr}) ELSE 0 END), 0) AS revenue_kopecks
+            FROM orders o
+            WHERE o.created_at >= ? AND o.created_at <= ?
+            GROUP BY code
+            `,
+            [noneParam, periodStartIso, periodEndIso]
+        ),
+        dbAll(`SELECT code, title FROM promotion_sources WHERE COALESCE(is_active, 1) = 1`, [])
+    ]);
+
+    return mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows);
+}
+
 async function hydrateTopProductImages(items) {
     const missing = items.filter((x) => !x.imageUrl).map((x) => x.name);
     if (!missing.length) return items;
@@ -432,7 +567,7 @@ async function getDashboardV2ApiPayload(opts) {
         periodApi = pk;
     }
 
-    const m = await fetchDashboardMetricsForRange(range);
+    const [m, sources] = await Promise.all([fetchDashboardMetricsForRange(range), fetchDashboardSourcesForRange(range)]);
     return {
         period: periodApi,
         range: {
@@ -470,7 +605,7 @@ async function getDashboardV2ApiPayload(opts) {
                 image_url: row.imageUrl || row.image_url || null
             };
         }),
-        sources: []
+        sources: Array.isArray(sources) ? sources : []
     };
 }
 
@@ -484,5 +619,8 @@ module.exports = {
     fetchDashboardMetricsForRange,
     fetchDashboardMetrics,
     getDashboardV2ApiPayload,
-    formatRuDate
+    formatRuDate,
+    mergeDashboardSourcesForApi,
+    fetchDashboardSourcesForRange,
+    DASHBOARD_SYSTEM_NONE_CODE
 };

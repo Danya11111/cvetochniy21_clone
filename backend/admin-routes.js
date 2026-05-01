@@ -417,6 +417,8 @@ function createAdminRouter({
                 } catch (e) {
                     const c = String(e.code || '');
                     if (c === 'TITLE_REQUIRED') return res.status(400).json({ ok: false, error: c });
+                    if (c === 'RESERVED_SOURCE_CODE')
+                        return res.status(400).json({ ok: false, error: c, message: 'Код зарезервирован системой.' });
                     if (c === 'TELEGRAM_BOT_USERNAME_REQUIRED') {
                         return res.status(503).json({
                             ok: false,
