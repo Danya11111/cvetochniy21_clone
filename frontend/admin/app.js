@@ -3689,7 +3689,7 @@ async function handleAction(action, value, eventTarget) {
     }
     if (action === 'promo-src-delete-prompt') {
         const code = String(value || '').trim();
-        if (!code) return;
+        if (!code || code === '__none__') return;
         openConfirmationSheet(
             {
                 title: 'Удалить источник?',

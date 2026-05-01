@@ -17,23 +17,37 @@ const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.statu
 const CANCELLED_SQL_O = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
 
 /**
- * Подзапрос: one row per клиент — telegram_id (нормализованная строка) и first_order_at.
- * Период: первый заказ попадает в [param1, param2] по календарному времени (как в SQLite).
- * Используем julianday: лексикографическое сравнение TEXT ломается на 'YYYY-MM-DD HH:MM:SS' vs '…T…Z'.
+ * Julian day для created_at заказа: не полагаться на MIN(created_at) как TEXT —
+ * при смеси '…T…Z' и 'YYYY-MM-DD HH:MM:SS' лексикографический MIN неверен.
+ * @param {string} colRef например `created_at` или `o.created_at`
+ */
+function sqlOrderCreatedJulianDay(colRef) {
+    const c = String(colRef || 'created_at').trim() || 'created_at';
+    const cast = `trim(cast(${c} AS TEXT))`;
+    return `COALESCE(
+        julianday(${c}),
+        julianday(replace(substr(replace(${cast}, 'Z', ''), 1, 19), 'T', ' ')),
+        julianday(substr(replace(${cast}, 'Z', ''), 1, 10))
+    )`;
+}
+
+/**
+ * Подзапрос: по одному telegram_id — клиент «новый в периоде», если минимальный по времени
+ * первый заказ попадает в [julianday(?), julianday(?)] (те же ISO-границы, что и список заказов).
  */
 function getSqlNewClientsFirstOrderInRangeSubquery() {
+    const jd = sqlOrderCreatedJulianDay('created_at');
     return `
-        SELECT
-            TRIM(CAST(telegram_id AS TEXT)) AS telegram_id,
-            MIN(created_at) AS first_order_at
+        SELECT TRIM(CAST(telegram_id AS TEXT)) AS telegram_id
         FROM orders
         WHERE telegram_id IS NOT NULL
           AND TRIM(CAST(telegram_id AS TEXT)) <> ''
           AND created_at IS NOT NULL
           AND TRIM(COALESCE(created_at, '')) <> ''
         GROUP BY TRIM(CAST(telegram_id AS TEXT))
-        HAVING julianday(MIN(created_at)) >= julianday(?)
-           AND julianday(MIN(created_at)) <= julianday(?)
+        HAVING MIN(${jd}) IS NOT NULL
+           AND MIN(${jd}) >= julianday(?)
+           AND MIN(${jd}) <= julianday(?)
     `;
 }
 
@@ -348,7 +362,6 @@ function mergeDashboardSourcesForApi(clickRows, orderRows, promoTitleRows) {
 async function fetchDashboardSourcesForRange(range) {
     const { periodStartIso, periodEndIso } = range;
     const revExpr = sqlOrderPaidRevenueKopecks('o');
-    const noneParam = DASHBOARD_SYSTEM_NONE_CODE;
 
     const [clickRows, orderRows, promoTitleRows] = await Promise.all([
         dbAll(
@@ -365,7 +378,7 @@ async function fetchDashboardSourcesForRange(range) {
             SELECT
                 CASE
                     WHEN o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''
-                    THEN ?
+                    THEN '${DASHBOARD_SYSTEM_NONE_CODE}'
                     ELSE TRIM(o.source_code)
                 END AS code,
                 COUNT(*) AS orders_count,
@@ -373,9 +386,13 @@ async function fetchDashboardSourcesForRange(range) {
                 COALESCE(SUM(CASE WHEN (${PAID_SQL_O}) THEN (${revExpr}) ELSE 0 END), 0) AS revenue_kopecks
             FROM orders o
             WHERE o.created_at >= ? AND o.created_at <= ?
-            GROUP BY code
+            GROUP BY CASE
+                WHEN o.source_code IS NULL OR TRIM(COALESCE(o.source_code, '')) = ''
+                THEN '${DASHBOARD_SYSTEM_NONE_CODE}'
+                ELSE TRIM(o.source_code)
+            END
             `,
-            [noneParam, periodStartIso, periodEndIso]
+            [periodStartIso, periodEndIso]
         ),
         dbAll(`SELECT code, title FROM promotion_sources WHERE COALESCE(is_active, 1) = 1`, [])
     ]);
@@ -634,6 +651,7 @@ module.exports = {
     getDashboardV2ApiPayload,
     formatRuDate,
     getSqlNewClientsFirstOrderInRangeSubquery,
+    sqlOrderCreatedJulianDay,
     mergeDashboardSourcesForApi,
     fetchDashboardSourcesForRange,
     DASHBOARD_SYSTEM_NONE_CODE

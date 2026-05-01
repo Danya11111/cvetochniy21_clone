@@ -9,7 +9,8 @@ const {
     getDashboardPeriodRange,
     getCustomDashboardPeriodRange,
     getAllTimeDashboardPeriodRange,
-    getSqlNewClientsFirstOrderInRangeSubquery
+    getSqlNewClientsFirstOrderInRangeSubquery,
+    sqlOrderCreatedJulianDay
 } = require('./admin-dashboard-service');
 const { orderPaidRevenueKopecksFromRow, kopecksToWholeRub, sqlOrderPaidRevenueKopecks } = require('./money');
 
@@ -90,11 +91,17 @@ async function listOrdersV2ForRange(range) {
 async function listClientsNewForRange(range) {
     const revExpr = sqlOrderPaidRevenueKopecks('ox');
     const newSub = getSqlNewClientsFirstOrderInRangeSubquery();
+    const foOrder = sqlOrderCreatedJulianDay('o2.created_at');
     const rows = await dbAll(
         `
         SELECT
             x.telegram_id,
-            x.first_order_at,
+            (SELECT o2.created_at FROM orders o2
+             WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = x.telegram_id
+               AND o2.created_at IS NOT NULL
+               AND TRIM(COALESCE(o2.created_at, '')) <> ''
+             ORDER BY ${foOrder} ASC
+             LIMIT 1) AS first_order_at,
             u.first_name,
             u.last_name,
             u.username,
@@ -108,7 +115,7 @@ async function listClientsNewForRange(range) {
             COALESCE(oc.paid_orders, 0) AS paid_orders,
             COALESCE(oc.total_revenue, 0) AS total_revenue
         FROM (${newSub}) x
-        LEFT JOIN users u ON u.telegram_id = x.telegram_id
+        LEFT JOIN users u ON TRIM(CAST(u.telegram_id AS TEXT)) = x.telegram_id
         LEFT JOIN (
             SELECT TRIM(CAST(ox.telegram_id AS TEXT)) AS telegram_id,
                 COUNT(*) AS total_orders,
@@ -118,7 +125,7 @@ async function listClientsNewForRange(range) {
             WHERE ox.telegram_id IS NOT NULL AND TRIM(CAST(ox.telegram_id AS TEXT)) <> ''
             GROUP BY TRIM(CAST(ox.telegram_id AS TEXT))
         ) oc ON oc.telegram_id = x.telegram_id
-        ORDER BY x.first_order_at DESC, x.telegram_id DESC
+        ORDER BY first_order_at DESC, x.telegram_id DESC
         LIMIT 500
         `,
         [range.periodStartIso, range.periodEndIso]
