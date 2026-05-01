@@ -559,6 +559,34 @@ async function runAllMigrationsAsync() {
 
         await ensureSupportThreadsDenormSchema(db, ensureColumn, console);
 
+        await new Promise((resolve, reject) => {
+            db.run(
+                `
+            CREATE TABLE IF NOT EXISTS support_response_windows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                telegram_user_id TEXT NOT NULL,
+                first_client_message_at TEXT NOT NULL,
+                first_manager_response_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            `,
+                (err) => (err ? reject(err) : resolve())
+            );
+        });
+        await new Promise((resolve, reject) => {
+            db.run(
+                'CREATE INDEX IF NOT EXISTS idx_support_response_windows_thread ON support_response_windows(thread_id)',
+                (err) => (err ? reject(err) : resolve())
+            );
+        });
+        await new Promise((resolve, reject) => {
+            db.run(
+                'CREATE INDEX IF NOT EXISTS idx_support_response_windows_first_client ON support_response_windows(first_client_message_at)',
+                (err) => (err ? reject(err) : resolve())
+            );
+        });
+
         console.log('[DBMigration] all_migrations_completed', { ok: true });
         settleDbMigrations.resolve();
     } catch (e) {

@@ -3,9 +3,12 @@ const UI_STATE_KEY = 'admin_mobile_ui_state_v1';
 const SCREEN_IDS = [
     'dashboard',
     'promo',
+    'orders',
+    'clients_new',
+    'clients_all',
+    'client_card',
     'home',
     'actions',
-    'orders',
     'clients',
     'client_detail',
     'broadcasts',
@@ -18,10 +21,11 @@ const SCREEN_IDS = [
 ];
 
 /** Доступные из нижнего меню вкладки (Mini App v2). */
-const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
+const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', ORDERS: 'orders', PROMO: 'promo' });
 
 const BOTTOM_NAV = [
     { id: BOTTOM_NAV_IDS.DASHBOARD, label: 'Дашборд' },
+    { id: BOTTOM_NAV_IDS.ORDERS, label: 'Заказы' },
     { id: BOTTOM_NAV_IDS.PROMO, label: 'Продвижение' }
 ];
 
@@ -30,7 +34,10 @@ const SCREEN_META = {
     promo: { title: 'Продвижение', subtitle: 'Источники и кампании', nav: 'promo' },
     home: { title: 'Главная', subtitle: 'Сводка дня', nav: 'home' },
     actions: { title: 'Действия', subtitle: 'Приоритеты', nav: 'home' },
-    orders: { title: 'Заказы', subtitle: 'Статусы и фильтры', nav: 'orders' },
+    orders: { title: 'Заказы', subtitle: '', nav: 'orders' },
+    clients_new: { title: 'Новые клиенты', subtitle: '', nav: 'dashboard' },
+    clients_all: { title: 'Все клиенты', subtitle: '', nav: 'dashboard' },
+    client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' },
     clients: { title: 'Клиенты', subtitle: 'Сегменты и LTV', nav: 'clients' },
     client_detail: { title: 'Клиент', subtitle: 'Карточка', nav: 'clients' },
     broadcasts: { title: 'Рассылки', subtitle: 'Кампании', nav: 'broadcasts' },
@@ -48,7 +55,7 @@ const DASH_METRIC_HELP = {
     orders_count: { title: 'Заказов', body: 'Количество всех созданных заказов за выбранный период.' },
     avg_check: { title: 'Ср. чек', body: 'Выручка за период, делённая на количество оплаченных заказов за этот период.' },
     new_clients: { title: 'Новые клиенты', body: 'Клиенты, у которых первый заказ попал в выбранный период.' },
-    clients_total: { title: 'Клиентов всего', body: 'Общее количество клиентов в базе (или оценка по заказам, если в базе пользователей пусто).' },
+    clients_total: { title: 'Все клиенты', body: 'Общее количество клиентов в базе (или оценка по заказам, если в базе пользователей пусто).' },
     cr: {
         title: 'CR',
         body: 'Прокси-конверсия: доля оплаченных заказов среди всех созданных заказов за выбранный период. Это не «визит → покупка».'
@@ -67,7 +74,7 @@ const DASH_METRIC_HELP = {
     },
     response_time: {
         title: 'Скорость ответа',
-        body: 'Среднее время до первого ответа поддержки по обращениям, созданным в выбранный период.'
+        body: 'Среднее время до первого ответа менеджера по «окнам»: первое сообщение клиента в течение 2 часов после начала окна, затем первый ответ сотрудника.'
     },
     abandoned_carts: {
         title: 'Брошенные корзины',
@@ -108,6 +115,11 @@ function dashIsValidYmd(s) {
 
 function migrateDashboardDatesInState(saved) {
     const rx = /^\d{4}-\d{2}-\d{2}$/;
+    if (state.dashboardPreset === 'all') {
+        state.dashboardDateFrom = '2025-01-01';
+        state.dashboardDateTo = dashYmdFromDate(new Date());
+        return;
+    }
     if (rx.test(state.dashboardDateFrom) && rx.test(state.dashboardDateTo)) return;
     const today = dashYmdFromDate(new Date());
     const legacy = saved && saved.dashboardPeriod === '7d' ? '7d' : 'today';
@@ -132,10 +144,12 @@ const state = {
     currentScreen: 'dashboard',
     dashboardDateFrom: '',
     dashboardDateTo: '',
-    /** @type {'today'|'7d'|''} */
+    /** @type {'today'|'7d'|'all'|''} */
     dashboardPreset: 'today',
     dashboardRangeUiError: '',
     message: '',
+    /** @type {'clients_new'|'clients_all'|''} */
+    clientListReturnScreen: '',
     orderFilter: 'all',
     orderClientTelegramId: '',
     clientFilter: 'all',
@@ -157,6 +171,7 @@ const state = {
     loading: false,
     orderDetails: {},
     clientDetails: {},
+    clientV2DetailById: {},
     supportDetails: {},
     broadcastDetails: {},
     promoSourcesList: [],
@@ -168,7 +183,8 @@ const state = {
     promoDetailById: {},
     promoFormSourceOpen: false,
     promoFormBroadcastOpen: false,
-    promoFlash: ''
+    promoFlash: '',
+    ordersV2RangeLabel: ''
 };
 
 function loadUiState() {
@@ -191,6 +207,7 @@ function loadUiState() {
             'dashboardDateFrom',
             'dashboardDateTo',
             'dashboardPreset',
+            'clientListReturnScreen',
             'orderFilter',
             'orderClientTelegramId',
             'clientFilter',
@@ -223,6 +240,7 @@ function saveUiState() {
             dashboardDateFrom: state.dashboardDateFrom,
             dashboardDateTo: state.dashboardDateTo,
             dashboardPreset: state.dashboardPreset,
+            clientListReturnScreen: state.clientListReturnScreen,
             orderFilter: state.orderFilter,
             orderClientTelegramId: state.orderClientTelegramId,
             clientFilter: state.clientFilter,
@@ -773,7 +791,7 @@ function buildTopicLink(chatId, threadId) {
 function resolveScreenFromHash() {
     const raw = String((location.hash || '').replace('#', '') || '').trim().toLowerCase();
     const candidate = raw || 'dashboard';
-    if (candidate === BOTTOM_NAV_IDS.DASHBOARD || candidate === BOTTOM_NAV_IDS.PROMO) {
+    if (SCREEN_IDS.includes(candidate)) {
         return candidate;
     }
     return BOTTOM_NAV_IDS.DASHBOARD;
@@ -807,7 +825,7 @@ function returnToStorefront() {
 
 function navigateTo(screenId) {
     let next = String(screenId || '').trim().toLowerCase();
-    if (next !== BOTTOM_NAV_IDS.DASHBOARD && next !== BOTTOM_NAV_IDS.PROMO) {
+    if (!SCREEN_IDS.includes(next)) {
         next = BOTTOM_NAV_IDS.DASHBOARD;
     }
     if (location.hash !== `#${next}`) {
@@ -1057,10 +1075,18 @@ function renderShell(contentHtml) {
     const meta = SCREEN_META[state.currentScreen] || SCREEN_META.home;
     const adminName = adminConfig && adminConfig.admin ? `${adminConfig.admin.name} · ${adminConfig.admin.adminId}` : '';
     const navBase = meta.nav;
-    const isDetailScreen = state.currentScreen === 'client_detail' || state.currentScreen === 'broadcast_detail';
+    const isDetailLike =
+        state.currentScreen === 'client_detail' ||
+        state.currentScreen === 'broadcast_detail' ||
+        state.currentScreen === 'client_card';
+    let headerBackAction = '';
+    if (state.currentScreen === 'client_detail') headerBackAction = 'client-back';
+    else if (state.currentScreen === 'broadcast_detail') headerBackAction = 'broadcast-back';
+    else if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
+    else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
-        contextHint = state.orderFilter === 'all' ? 'Все заказы' : `Фильтр: ${state.orderFilter}`;
+        contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
     } else if (state.currentScreen === 'clients') {
         contextHint = state.clientFilter === 'all' ? 'Все клиенты' : `Сегмент: ${state.clientFilter}`;
     } else if (state.currentScreen === 'broadcasts') {
@@ -1070,7 +1096,6 @@ function renderShell(contentHtml) {
     } else if (state.currentScreen === 'analytics') {
         contextHint = `Период: ${state.analyticsPeriod}`;
     }
-    const backAction = state.currentScreen === 'client_detail' ? 'client-back' : 'broadcast-back';
     const refreshedAtLabel = formatTime(state.lastRefreshedAt || new Date().toISOString());
     return `
         <main class="admin-shell admin-app-shell">
@@ -1081,8 +1106,8 @@ function renderShell(contentHtml) {
                         ${meta.subtitle ? `<p class="admin-compact-header__subtitle">${esc(meta.subtitle)}</p>` : ''}
                     </div>
                     <div class="admin-compact-header__toolbar" role="toolbar" aria-label="Действия шапки">
-                        ${isDetailScreen ? `<button type="button" class="header-action header-action--ghost header-action--sm" data-action="${esc(backAction)}">Назад</button>` : ''}
-                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">${isDetailScreen ? 'К витрине' : 'Назад'}</button>
+                        ${headerBackAction ? `<button type="button" class="header-action header-action--ghost header-action--sm" data-action="${esc(headerBackAction)}">Назад</button>` : ''}
+                        <button type="button" class="header-action header-action--ghost header-action--sm" data-action="open-storefront">${isDetailLike ? 'К витрине' : 'Назад'}</button>
                         <button type="button" class="header-action header-action--primary header-action--icon" data-action="reload-screen" title="Обновить" aria-label="Обновить данные">
                             <span class="header-action__glyph" aria-hidden="true">↻</span>
                         </button>
@@ -1165,15 +1190,43 @@ function dashboardFormatPct(v) {
 }
 
 function buildDashboardV2RequestPath() {
+    if (state.dashboardPreset === 'all') {
+        return '/api/admin/dashboard-v2?period=all';
+    }
     const f = String(state.dashboardDateFrom || '').trim();
     const t = String(state.dashboardDateTo || '').trim();
     return `/api/admin/dashboard-v2?from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
 }
 
-function renderMiniMetricCell(label, value, danger = false, tipId = '') {
+function buildOrdersV2RequestPath() {
+    if (state.dashboardPreset === 'all') {
+        return '/api/admin/orders-v2?period=all';
+    }
+    const f = String(state.dashboardDateFrom || '').trim();
+    const t = String(state.dashboardDateTo || '').trim();
+    return `/api/admin/orders-v2?from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
+}
+
+function buildClientsNewV2RequestPath() {
+    if (state.dashboardPreset === 'all') {
+        return '/api/admin/clients-v2?kind=new&period=all';
+    }
+    const f = String(state.dashboardDateFrom || '').trim();
+    const t = String(state.dashboardDateTo || '').trim();
+    return `/api/admin/clients-v2?kind=new&from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`;
+}
+
+function renderMiniMetricCell(label, value, danger = false, tipId = '', navAction = '') {
     const dm = danger ? ' dashboard-v2__metric-cell--danger' : '';
-    const tipAttr = tipId ? ` data-action="dash-tip" data-tip-id="${esc(tipId)}"` : '';
     const val = typeof value === 'string' ? value : esc(String(value ?? ''));
+    if (navAction) {
+        return `
+        <button type="button" class="dashboard-v2__metric-cell${dm}" data-action="${esc(navAction)}" aria-label="${esc(label)}">
+            <span class="dashboard-v2__metric-label">${esc(label)}</span>
+            <span class="dashboard-v2__metric-value">${val}</span>
+        </button>`;
+    }
+    const tipAttr = tipId ? ` data-action="dash-tip" data-tip-id="${esc(tipId)}"` : '';
     return `
         <button type="button" class="dashboard-v2__metric-cell${dm}"${tipAttr} aria-label="${esc(`${label}, справка`)}">
             <span class="dashboard-v2__metric-label">${esc(label)}</span>
@@ -1225,28 +1278,31 @@ async function renderDashboardV2Screen() {
      */
     const crLine = dashboardFormatPct(m.crPercent);
 
-    const topSlots = [{ name: '', quantity: 0 }, { name: '', quantity: 0 }, { name: '', quantity: 0 }];
-    topProducts.slice(0, 3).forEach((row, idx) => {
-        topSlots[idx] = {
-            name: row != null && row.name != null ? String(row.name) : '',
-            quantity: Math.round(Number(row && row.quantity) || 0)
-        };
-    });
-    const topListHtml = topSlots
-        .map((row, i) => {
-            const nameStr = String(row.name || '').trim();
-            const hasName = nameStr.length > 0;
-            const lineBody = hasName ? `${nameStr} — ${row.quantity} шт` : 'нет данных';
-            return `
-                <div class="dashboard-v2__top-row">
-                    <span class="dash-rank">${i + 1}</span>
-                    <span class="dash-top-meta">${esc(lineBody)}</span>
-                </div>`;
-        })
-        .join('');
+    const topCarouselInner =
+        topProducts.length === 0
+            ? `<div class="dashboard-v2__empty-soft">Нет данных по товарам за период</div>`
+            : `<div class="dashboard-v2__top-carousel" role="list">${topProducts
+                  .map((row) => {
+                      const name = row != null && row.name != null ? String(row.name).trim() : '';
+                      const dispName = name || 'Товар';
+                      const qty = Math.round(Number(row && row.quantity) || 0);
+                      const img = String((row && (row.image_url || row.imageUrl)) || '').trim();
+                      const imgBlock = img
+                          ? `<img class="dashboard-v2__top-card-img" src="${esc(img)}" alt="" loading="lazy" />`
+                          : `<div class="dashboard-v2__top-card-img dashboard-v2__top-card-img--ph" aria-hidden="true"></div>`;
+                      return `<div class="dashboard-v2__top-card" role="listitem">
+                        ${imgBlock}
+                        <div class="dashboard-v2__top-card-body">
+                            <div class="dashboard-v2__top-card-name">${esc(dispName)}</div>
+                            <div class="dashboard-v2__top-card-buy">Купили: ${formatNum(qty)}</div>
+                        </div>
+                    </div>`;
+                  })
+                  .join('')}</div>`;
 
     const presetToday = state.dashboardPreset === 'today';
     const preset7d = state.dashboardPreset === '7d';
+    const presetAll = state.dashboardPreset === 'all';
 
     const uiErrBanner = state.dashboardRangeUiError
         ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn" role="alert">${esc(state.dashboardRangeUiError)}</div>`
@@ -1261,9 +1317,10 @@ async function renderDashboardV2Screen() {
                 <h2 id="dash-heading-main" class="dashboard-v2__headline">Основные показатели</h2>
                 <div class="dashboard-v2__period-panel" aria-labelledby="dash-period-heading">
                     <p id="dash-period-heading" class="dashboard-v2__period-heading">Период</p>
-                    <div class="dashboard-v2__period-segments" role="group" aria-label="Пресет периода">
+                    <div class="dashboard-v2__period-segments dashboard-v2__period-segments--flexwrap" role="group" aria-label="Пресет периода">
                         <button type="button" class="dashboard-v2__period-chip ${presetToday ? 'dashboard-v2__period-chip--active' : ''}" data-action="dashboard-preset-today">Сегодня</button>
                         <button type="button" class="dashboard-v2__period-chip ${preset7d ? 'dashboard-v2__period-chip--active' : ''}" data-action="dashboard-preset-7d">7 дней</button>
+                        <button type="button" class="dashboard-v2__period-chip ${presetAll ? 'dashboard-v2__period-chip--active' : ''}" data-action="dashboard-preset-all">За всё время</button>
                     </div>
                     <div class="dashboard-v2__period-custom">
                         <div class="dashboard-v2__period-dates-row">
@@ -1294,8 +1351,8 @@ async function renderDashboardV2Screen() {
                 <section class="dashboard-v2__grid4" aria-label="Ключевые метрики">
                     ${renderMiniMetricCell('Заказов', formatNum(m.ordersCount), false, 'orders_count')}
                     ${renderMiniMetricCell('Ср. чек', formatKopecksAsRub(m.averageCheckKopecks), false, 'avg_check')}
-                    ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount), false, 'new_clients')}
-                    ${renderMiniMetricCell('Клиентов всего', formatNum(m.clientsTotalCount), false, 'clients_total')}
+                    ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount), false, '', 'dashboard-open-new-clients')}
+                    ${renderMiniMetricCell('Все клиенты', formatNum(m.clientsTotalCount), false, '', 'dashboard-open-all-clients')}
                 </section>
             </section>
 
@@ -1319,7 +1376,7 @@ async function renderDashboardV2Screen() {
                 <span class="dashboard-v2__subhead">Топ популярных товаров</span>
                 <span class="dashboard-v2__subhead-hint" aria-hidden="true">?</span>
             </button>
-            <article class="dashboard-v2__card">${topListHtml}</article>
+            <article class="dashboard-v2__card dashboard-v2__card--top-carousel">${topCarouselInner}</article>
 
             <button type="button" class="dashboard-v2__analytics-tap" data-action="dash-tip" data-tip-id="order_sources" aria-label="Источники заказов, справка">
                 <span class="dashboard-v2__subhead">Лучшие источники заказов</span>
@@ -1329,6 +1386,137 @@ async function renderDashboardV2Screen() {
                 <div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>
             </article>
         </div>`;
+}
+
+function formatOrderListDate(iso) {
+    const raw = String(iso || '').trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+    return raw.slice(0, 16).replace('T', ' ');
+}
+
+async function renderClientsNewScreen() {
+    migrateDashboardDatesInState({});
+    let wrap;
+    try {
+        wrap = (await api(buildClientsNewV2RequestPath())).data;
+    } catch (e) {
+        return errorState(e.message || 'Не удалось загрузить клиентов');
+    }
+    const clients = wrap.clients || [];
+    const rangeLabel = wrap.range && wrap.range.label ? wrap.range.label : '—';
+    if (!clients.length) {
+        return `
+        <div class="dashboard-v2 screen-enter">
+            <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
+            <div class="dashboard-v2__empty-soft">Новых клиентов за выбранный период нет</div>
+        </div>`;
+    }
+    return `
+    <div class="dashboard-v2 screen-enter">
+        <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
+        <div class="mini-clients-stack">
+        ${clients
+            .map((c) => {
+                const id = esc(c.telegram_id);
+                const name = esc(c.display_name || c.telegram_id);
+                const rev = formatKopecksAsRub(c.total_revenue_kopecks || 0);
+                const un = c.username ? `@${esc(c.username)}` : esc(c.telegram_id);
+                const ph = c.phone ? ` · ${esc(c.phone)}` : '';
+                return `<button type="button" class="mini-client-row" data-action="open-client-v2-card" data-id="${id}" data-list="new">
+                <div class="mini-client-row__top">
+                    <span class="mini-client-row__name">${name}</span>
+                    <span class="mini-client-row__meta">${esc(formatOrderListDate(c.first_order_at))}</span>
+                </div>
+                <div class="mini-client-row__sub mono">${un}${ph}</div>
+                <div class="mini-client-row__foot"><span>${formatNum(c.total_orders)} заказ.</span><span>${rev}</span></div>
+            </button>`;
+            })
+            .join('')}
+        </div>
+    </div>`;
+}
+
+async function renderClientsAllScreen() {
+    let wrap;
+    try {
+        wrap = (await api('/api/admin/clients-v2?kind=all')).data;
+    } catch (e) {
+        return errorState(e.message || 'Не удалось загрузить клиентов');
+    }
+    const clients = wrap.clients || [];
+    if (!clients.length) {
+        return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиентов пока нет</div></div>`;
+    }
+    return `
+    <div class="dashboard-v2 screen-enter">
+        <div class="mini-clients-stack">
+        ${clients
+            .map((c) => {
+                const id = esc(c.telegram_id);
+                const name = esc(c.display_name || c.telegram_id);
+                const rev = formatKopecksAsRub(c.total_revenue_kopecks || 0);
+                const un = c.username ? `@${esc(c.username)}` : esc(c.telegram_id);
+                const ph = c.phone ? ` · ${esc(c.phone)}` : '';
+                return `<button type="button" class="mini-client-row" data-action="open-client-v2-card" data-id="${id}" data-list="all">
+                <div class="mini-client-row__top">
+                    <span class="mini-client-row__name">${name}</span>
+                </div>
+                <div class="mini-client-row__sub mono">${un}${ph}</div>
+                <div class="mini-client-row__foot"><span>${formatNum(c.total_orders)} заказ.</span><span>${rev}</span></div>
+            </button>`;
+            })
+            .join('')}
+        </div>
+    </div>`;
+}
+
+async function renderClientCardV2Screen() {
+    const clientId = String(state.selectedClientId || '').trim();
+    if (!clientId) {
+        return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиент не выбран</div></div>`;
+    }
+    if (!state.clientV2DetailById[clientId]) {
+        const res = await api(`/api/admin/clients-v2/${encodeURIComponent(clientId)}`);
+        state.clientV2DetailById[clientId] = res.data;
+    }
+    const d = state.clientV2DetailById[clientId];
+    if (!d) {
+        return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиент не найден</div></div>`;
+    }
+    const titleName = esc(d.full_name || d.username || d.telegram_id);
+    const dateHdr = d.first_order_at ? esc(formatOrderListDate(d.first_order_at)) : '—';
+    const idLine = esc(String(d.telegram_id));
+    const pillOrders = formatNum(d.total_orders || 0);
+    const pillSum = formatKopecksAsRub(d.total_revenue_kopecks || 0);
+    const phone = d.phone ? esc(d.phone) : '—';
+    const src = d.source_code ? esc(d.source_code) : '—';
+    const tg = d.username ? `@${esc(d.username)}` : '—';
+    const bonus = formatNum(d.bonus_balance || 0);
+
+    return `
+    <div class="client-v2-sheet screen-enter">
+        <div class="client-v2-hero">
+            <div class="client-v2-hero__row">
+                <h2 class="client-v2-hero__name">${titleName}</h2>
+                <span class="client-v2-hero__date">${dateHdr}</span>
+            </div>
+            <p class="client-v2-hero__id mono">ID: ${idLine}</p>
+            <div class="client-v2-pills">
+                <span class="client-v2-pill">Заказов: ${pillOrders}</span>
+                <span class="client-v2-pill">Сумма: ${pillSum}</span>
+            </div>
+        </div>
+        <div class="client-v2-grid">
+            <div class="client-v2-k">Телефон</div><div class="client-v2-v">${phone}</div>
+            <div class="client-v2-k">Источник</div><div class="client-v2-v">${src}</div>
+            <div class="client-v2-k">Telegram</div><div class="client-v2-v">${tg}</div>
+            <div class="client-v2-k">Заказов</div><div class="client-v2-v">${pillOrders}</div>
+            <div class="client-v2-k">Сумма</div><div class="client-v2-v">${pillSum}</div>
+            <div class="client-v2-k">Бонусы</div><div class="client-v2-v">${bonus}</div>
+        </div>
+        <button type="button" class="client-v2-fullprof" data-action="client-open-full-profile">Открыть карточку пользователя</button>
+    </div>`;
 }
 
 function formatPromoBroadcastDateTime(iso) {
@@ -1900,137 +2088,55 @@ function orderStatusTitle(order) {
 }
 
 async function renderOrdersScreen() {
-    const [rowsRes, summaryRes] = await Promise.all([
-        api('/api/admin/orders?limit=140'),
-        api('/api/admin/orders/summary')
-    ]);
-    const rows = rowsRes.data || [];
-    const summary = summaryRes.data || {};
-    const totals = summary.totals || {};
-    const highlights = Array.isArray(summary.highlights) ? summary.highlights : [];
-    const signals = summary.orderSignals || {};
-    const filtered = filteredOrders(rows);
-    const scoped = state.orderClientTelegramId
-        ? filtered.filter((row) => String(row.telegram_id || '') === state.orderClientTelegramId)
-        : filtered;
-    const topFilters = [
-        { id: 'all', label: 'Все' },
-        { id: 'today', label: 'Сегодня' },
-        { id: 'unpaid', label: 'Ждут оплаты' },
-        { id: 'problematic', label: 'Проблемные' },
-        { id: 'urgent', label: 'Срочные' }
-    ];
-    const segmentFilters = [
-        { id: 'paid', label: 'Оплачены' },
-        { id: 'repeat', label: 'Повторные' },
-        { id: 'large', label: 'Крупные' },
-        { id: 'large_unpaid', label: 'Крупные без оплаты' },
-        { id: 'tomorrow', label: 'На завтра' },
-        { id: 'no_attention', label: 'Без внимания' }
-    ];
-    const kpiStrip = [
-        { id: 'all', label: 'Всего', value: totals.total },
-        { id: 'paid', label: 'Оплачено', value: totals.paid },
-        { id: 'unpaid', label: 'Не оплачено', value: totals.unpaid },
-        { id: 'urgent', label: 'Срочные', value: totals.urgent },
-        { id: 'problematic', label: 'Проблемные', value: totals.problematic }
-    ];
+    migrateDashboardDatesInState({});
+    let wrap;
+    try {
+        wrap = (await api(buildOrdersV2RequestPath())).data;
+    } catch (e) {
+        return errorState(e.message || 'Не удалось загрузить заказы');
+    }
+    const orders = wrap.orders || [];
+    const rangeLabel = wrap.range && wrap.range.label ? String(wrap.range.label) : '—';
+    state.ordersV2RangeLabel = rangeLabel;
+
+    if (!orders.length) {
+        return `
+        <div class="dashboard-v2 screen-enter">
+            <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
+            <div class="dashboard-v2__empty-soft">Заказов за выбранный период нет</div>
+        </div>`;
+    }
 
     return `
-        ${sectionHeader('Заказы', 'Операционный контроль выручки и рисков')}
-        ${renderPlaybookBanner('orders')}
-        <article class="card">
-            <div class="kpi-label">Сейчас в списке</div>
-            <div class="kpi-value">${formatNum(totals.total)}</div>
-            <div class="kpi-note">Не оплачено: ${formatNum(totals.unpaid)} · Срочные: ${formatNum(totals.urgent)} · Проблемные: ${formatNum(totals.problematic)}</div>
-        </article>
-
-        <div class="orders-kpi-strip">
-            ${kpiStrip.map((item) => `
-                <button class="orders-kpi-chip ${state.orderFilter === item.id ? 'active' : ''}" data-action="orders-filter" data-value="${item.id}">
-                    <span>${esc(item.label)}</span>
-                    <strong>${formatNum(item.value)}</strong>
-                </button>
-            `).join('')}
-        </div>
-
-        <div class="chips">
-            ${topFilters.map((chip) => `<button class="chip ${state.orderFilter === chip.id ? 'active' : ''}" data-action="orders-filter" data-value="${chip.id}">${esc(chip.label)}</button>`).join('')}
-        </div>
-        <div class="chips">
-            ${segmentFilters.map((chip) => `<button class="chip ${state.orderFilter === chip.id ? 'active' : ''}" data-action="orders-filter" data-value="${chip.id}">${esc(chip.label)}</button>`).join('')}
-        </div>
-
-        <article class="list-card">
-            <h3 class="list-card-title">Требует внимания по заказам</h3>
-            <p class="list-card-meta">Потенциально замороженная выручка: <strong>${formatKopecksAsRub(summary.frozenRevenue)}</strong></p>
-            <p class="list-card-meta">Сегодня в доставке: ${formatNum(signals.deliveryToday)} · Повторные клиенты сегодня: ${formatNum(signals.repeatToday)}</p>
-            ${highlights.length ? highlights.map((item) => `
-                <div class="list-card-footer">
-                    <span class="mono">#${esc(item.orderId)} · ${esc(item.client)} · ${formatKopecksAsRub(item.amount)}</span>
-                    <button class="secondary" data-action="order-open" data-id="${esc(item.orderId)}">Открыть</button>
-                </div>
-            `).join('') : '<p class="list-card-meta mt-2">Критичных заказов сейчас нет.</p>'}
-        </article>
-        ${renderPlaybookCards({ source: 'Заказы', target: 'orders', limit: 2 })}
-
-        ${state.orderClientTelegramId ? `
-            <article class="state-card">
-                <h3 class="list-card-title">Показываем заказы выбранного клиента</h3>
-                <p class="list-card-meta">Telegram ID: ${esc(state.orderClientTelegramId)}</p>
-                <button class="mt-2 secondary" data-action="orders-scope-clear">Показать все заказы</button>
-            </article>
-        ` : ''}
-        <div class="list-card-meta">Показано: ${formatNum(scoped.length)} из ${formatNum(rows.length)}</div>
-        ${scoped.length ? scoped.slice(0, 100).map((order) => {
-            const orderId = Number(order.id);
-            const detail = state.orderDetails[orderId] || null;
-            const topicLink = order.topic_link || buildTopicLink(order.topic_chat_id, order.topic_thread_id);
-            const clientName = (`${order.first_name || ''} ${order.last_name || ''}`.trim()) || order.full_name || 'Клиент';
-            return `
-                <article class="list-card order-card ${esc(order.attention_level || 'normal')}">
-                    <div class="list-card-footer">
-                        <h3 class="list-card-title">#${orderId} · ${esc(clientName)}</h3>
-                        <strong class="order-amount">${formatKopecksAsRub(order.amount_kopecks ?? 0)}</strong>
-                    </div>
-                    <p class="list-card-meta">${esc(orderStatusTitle(order))}</p>
-
-                    <div class="order-meta-row">
-                        ${statusBadge(order.status_label || 'В работе', order.status_tone || 'info')}
-                        ${statusBadge(order.attention_label || 'В норме', orderAttentionTone(order.attention_level))}
-                        ${order.is_urgent ? statusBadge('Срочно', 'alert') : ''}
-                        ${order.is_repeat_client ? statusBadge('Повторный', 'info') : statusBadge('Новый', 'ok')}
-                        ${order.is_large_order ? statusBadge('Высокий чек', 'warn') : ''}
-                    </div>
-
-                    <div class="list-card-footer">
-                        <span class="list-card-meta">Доставка: ${esc(formatOrderDelivery(order))}</span>
-                        <span class="list-card-meta">Создан: ${esc(String(order.created_at || '').replace('T', ' ').slice(0, 16))}</span>
-                    </div>
-                    <div class="list-card-footer">
-                        <span class="list-card-meta">Позиций: ${formatNum(order.items_count)} · Заказов клиента: ${formatNum(order.client_orders_count)}</span>
-                        <span class="list-card-meta">LTV: ${formatKopecksAsRub(order.client_lifetime_value_stub)}</span>
-                    </div>
-
-                    <div class="order-actions">
-                        <button data-action="order-open" data-id="${orderId}">Открыть</button>
-                        <button class="secondary" data-action="order-open-client" data-id="${esc(order.telegram_id || '')}">Клиент</button>
-                        ${topicLink ? `<a class="order-topic-link" href="${esc(topicLink)}" target="_blank" rel="noopener">Тема</a>` : '<span class="list-card-meta">Тема не создана</span>'}
-                    </div>
-
-                    ${detail ? `
-                        <div class="card mt-2">
-                            <div class="kpi-label">Последние следы обработки</div>
-                            <p class="list-card-meta">Платежей: ${formatNum((detail.payments || []).length)} · Outbox: ${formatNum((detail.outbox || []).length)}</p>
-                            ${(detail.outbox || []).slice(0, 3).map((o) => `<div class="mono">${esc(o.event_type)} · ${esc(o.status)} · попыток ${formatNum(o.attempts)}</div>`).join('')}
+        <div class="dashboard-v2 screen-enter">
+            <p class="dashboard-v2__period-hint">${esc(rangeLabel)}</p>
+            <div class="orders-v2-stack">
+            ${orders
+                .map((o) => {
+                    const id = Number(o.id);
+                    const paid = o.is_paid ? 'Оплачен' : 'Не оплачен';
+                    const name =
+                        o.client_name && String(o.client_name).trim()
+                            ? esc(String(o.client_name).trim())
+                            : o.telegram_id
+                              ? esc(String(o.telegram_id))
+                              : '—';
+                    const dt = esc(formatOrderListDate(o.created_at));
+                    const sum = formatKopecksAsRub(o.amount_kopecks || 0);
+                    const src = o.source_code ? `Источник: ${esc(String(o.source_code))}` : '';
+                    const pos = Number(o.items_count) > 0 ? `${formatNum(o.items_count)} поз.` : '';
+                    return `<article class="orders-v2-card">
+                        <div class="orders-v2-card__top">
+                            <strong class="orders-v2-card__id">Заказ #${id}</strong>
                         </div>
-                    ` : ''}
-                </article>
-            `;
-        }).join('') : (rows.length
-            ? (renderPlaybookCalmState('orders') || `<article class="state-card calm"><h3 class="list-card-title">По этому срезу всё спокойно</h3><p class="list-card-meta">Критичных заказов в выбранном фильтре нет. Можно вернуться к общему списку.</p><button class="mt-2 secondary" data-action="orders-filter" data-value="all">Показать все заказы</button></article>`)
-            : emptyState('Заказов пока нет', 'Когда появятся новые заказы, они будут показаны здесь.'))}
-    `;
+                        <p class="orders-v2-card__line">${dt} · ${esc(paid)}</p>
+                        <p class="orders-v2-card__line orders-v2-card__line--emph">${name} · ${sum}</p>
+                        <p class="orders-v2-card__meta">${[src, pos].filter(Boolean).join(' · ') || '\u00A0'}</p>
+                    </article>`;
+                })
+                .join('')}
+            </div>
+        </div>`;
 }
 
 function filterClients(rows) {
@@ -3057,6 +3163,9 @@ async function renderSystemScreen() {
 async function renderScreenContent() {
     if (state.currentScreen === 'dashboard') return renderDashboardV2Screen();
     if (state.currentScreen === 'promo') return renderPromoScreen();
+    if (state.currentScreen === 'clients_new') return renderClientsNewScreen();
+    if (state.currentScreen === 'clients_all') return renderClientsAllScreen();
+    if (state.currentScreen === 'client_card') return renderClientCardV2Screen();
     if (state.currentScreen === 'home') return renderHomeScreen();
     if (state.currentScreen === 'actions') return renderActionsScreen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
@@ -3231,6 +3340,51 @@ async function handleAction(action, value, eventTarget) {
         state.dashboardPreset = '7d';
         state.dashboardRangeUiError = '';
         await renderApp();
+        return;
+    }
+    if (action === 'dashboard-preset-all') {
+        state.dashboardDateFrom = '2025-01-01';
+        state.dashboardDateTo = dashYmdFromDate(new Date());
+        state.dashboardPreset = 'all';
+        state.dashboardRangeUiError = '';
+        await renderApp();
+        return;
+    }
+    if (action === 'dashboard-open-new-clients') {
+        navigateTo('clients_new');
+        return;
+    }
+    if (action === 'dashboard-open-all-clients') {
+        navigateTo('clients_all');
+        return;
+    }
+    if (action === 'open-client-v2-card') {
+        const id = String(value || '').trim();
+        if (!id) return;
+        const list =
+            eventTarget && eventTarget.getAttribute ? String(eventTarget.getAttribute('data-list') || '') : '';
+        state.selectedClientId = id;
+        state.clientListReturnScreen = list === 'all' ? 'clients_all' : 'clients_new';
+        delete state.clientV2DetailById[id];
+        navigateTo('client_card');
+        return;
+    }
+    if (action === 'client-card-back') {
+        navigateTo(state.clientListReturnScreen === 'clients_all' ? 'clients_all' : 'clients_new');
+        return;
+    }
+    if (action === 'mini-stack-back') {
+        navigateTo('dashboard');
+        return;
+    }
+    if (action === 'client-open-full-profile') {
+        const id = String(state.selectedClientId || '').trim();
+        if (!id) return;
+        state.clientsContextFilter = state.clientFilter;
+        state.clientsContextQ = state.clientsQ;
+        state.clientDetailTab = 'orders';
+        await openClientDetail(id);
+        navigateTo('client_detail');
         return;
     }
     if (action === 'dashboard-apply-range') {

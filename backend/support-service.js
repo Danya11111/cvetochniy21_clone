@@ -20,6 +20,10 @@ function get(sql, params = []) {
     });
 }
 
+/** Окно для метрики «скорость ответа» и антидубль уведомлений в тему поддержки. */
+const SUPPORT_RESPONSE_WINDOW_MS = 2 * 60 * 60 * 1000;
+const SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+
 function createSupportService({
     telegramClient,
     routingService,
@@ -29,6 +33,70 @@ function createSupportService({
     managerHelpCooldownMs = 7 * 60 * 1000,
     telegramOutboundBotHttpEnabled = true
 }) {
+    /**
+     * Первое клиентское сообщение после 2 ч от начала предыдущего окна — новая строка окна.
+     */
+    async function openSupportResponseWindowIfNeeded(threadDbId, telegramUserId, clientMessageAtIso) {
+        try {
+            const latest = await get(
+                `
+                SELECT first_client_message_at
+                FROM support_response_windows
+                WHERE thread_id = ?
+                ORDER BY first_client_message_at DESC
+                LIMIT 1
+                `,
+                [Number(threadDbId)]
+            );
+            const nowMs = Date.parse(clientMessageAtIso);
+            let needNew = true;
+            if (latest && latest.first_client_message_at) {
+                const startMs = Date.parse(String(latest.first_client_message_at));
+                if (Number.isFinite(startMs) && Number.isFinite(nowMs) && nowMs - startMs < SUPPORT_RESPONSE_WINDOW_MS) {
+                    needNew = false;
+                }
+            }
+            if (!needNew) return;
+            await run(
+                `
+                INSERT INTO support_response_windows (thread_id, telegram_user_id, first_client_message_at, created_at)
+                VALUES (?, ?, ?, ?)
+                `,
+                [Number(threadDbId), String(telegramUserId), clientMessageAtIso, clientMessageAtIso]
+            );
+        } catch (e) {
+            logger.warn('[SupportResponseWindow] open_failed', {
+                threadId: Number(threadDbId),
+                message: String(e && e.message ? e.message : e).slice(0, 200)
+            });
+        }
+    }
+
+    async function assignManagerFirstResponseToOldestWindow(threadDbId, managerReplyAtIso) {
+        try {
+            const pending = await get(
+                `
+                SELECT id FROM support_response_windows
+                WHERE thread_id = ?
+                  AND (first_manager_response_at IS NULL OR TRIM(COALESCE(first_manager_response_at,'')) = '')
+                ORDER BY first_client_message_at ASC
+                LIMIT 1
+                `,
+                [Number(threadDbId)]
+            );
+            if (!pending) return;
+            await run(`UPDATE support_response_windows SET first_manager_response_at = ? WHERE id = ?`, [
+                managerReplyAtIso,
+                Number(pending.id)
+            ]);
+        } catch (e) {
+            logger.warn('[SupportResponseWindow] manager_stamp_failed', {
+                threadId: Number(threadDbId),
+                message: String(e && e.message ? e.message : e).slice(0, 200)
+            });
+        }
+    }
+
     async function getOrCreateThread({ telegramUserId, topic }) {
         const existing = await get('SELECT * FROM support_threads WHERE telegram_user_id = ?', [String(telegramUserId)]);
         const now = new Date().toISOString();
@@ -144,6 +212,10 @@ function createSupportService({
             );
         }
 
+        if (copied.ok) {
+            await openSupportResponseWindowIfNeeded(thread.id, telegramUserId, new Date().toISOString());
+        }
+
         if (supportNotifyChatId && supportNotifyThreadId > 0) {
             const topicLink = routingService.buildTopicLink(topic.chat_id, topic.message_thread_id);
             const text =
@@ -151,20 +223,47 @@ function createSupportService({
                 `👤 ${[from.first_name, from.last_name].filter(Boolean).join(' ') || '-'}\n` +
                 `🆔 ${telegramUserId}\n` +
                 `@${from.username || '-'}`;
-            const sent = await telegramClient.sendMessage({
-                chatId: supportNotifyChatId,
-                messageThreadId: Number(supportNotifyThreadId),
-                text,
-                replyMarkup: topicLink
-                    ? { inline_keyboard: [[{ text: 'Перейти в тему клиента', url: topicLink }]] }
-                    : undefined
-            });
-            logger.log('[SupportNotifyTopic] support notify topic', {
-                chatId: String(supportNotifyChatId),
-                threadId: Number(supportNotifyThreadId),
-                ok: !!sent?.ok,
-                errorCode: sent?.ok ? null : sent?.errorCode || null
-            });
+
+            const tRow = await get(`SELECT last_client_notification_at FROM support_threads WHERE id = ?`, [
+                Number(thread.id)
+            ]);
+            const lastN = tRow && tRow.last_client_notification_at ? String(tRow.last_client_notification_at) : '';
+            let shouldNotify = !lastN;
+            if (lastN) {
+                const t = Date.parse(lastN);
+                shouldNotify = !Number.isFinite(t) || Date.now() - t >= SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS;
+            }
+
+            if (shouldNotify) {
+                const sent = await telegramClient.sendMessage({
+                    chatId: supportNotifyChatId,
+                    messageThreadId: Number(supportNotifyThreadId),
+                    text,
+                    replyMarkup: topicLink
+                        ? { inline_keyboard: [[{ text: 'Перейти в тему клиента', url: topicLink }]] }
+                        : undefined
+                });
+                logger.log('[SupportNotifyTopic] support notify topic', {
+                    chatId: String(supportNotifyChatId),
+                    threadId: Number(supportNotifyThreadId),
+                    ok: !!sent?.ok,
+                    errorCode: sent?.ok ? null : sent?.errorCode || null
+                });
+                if (sent?.ok) {
+                    const stamp = new Date().toISOString();
+                    await run(`UPDATE support_threads SET last_client_notification_at = ? WHERE id = ?`, [
+                        stamp,
+                        Number(thread.id)
+                    ]);
+                }
+            } else {
+                logger.log('[SupportNotifyTopic] support_notify_skipped_window', {
+                    threadDbId: Number(thread.id),
+                    telegramUserId,
+                    last_client_notification_at: lastN || null,
+                    cooldownHours: SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS / 3600000
+                });
+            }
         } else {
             logger.log('[SupportNotifyTopic] skip (no chat/thread)', {
                 hasChat: !!supportNotifyChatId,
@@ -280,6 +379,7 @@ function createSupportService({
                 `,
                 [now, now, now, Number(thread.id)]
             );
+            await assignManagerFirstResponseToOldestWindow(thread.id, now);
         } else {
             const now = new Date().toISOString();
             await run(`UPDATE support_threads SET updated_at = ? WHERE id = ?`, [now, Number(thread.id)]);

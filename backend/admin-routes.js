@@ -3,6 +3,13 @@ const path = require('path');
 const fs = require('fs');
 const { ADMIN_PERMISSIONS, ALL_ADMIN_PERMISSIONS } = require('./admin-permissions');
 const { getDashboardV2ApiPayload } = require('./admin-dashboard-service');
+const {
+    resolveDashboardLikeRangeFromQuery,
+    listOrdersV2ForRange,
+    listClientsNewForRange,
+    listClientsAllV2,
+    getClientV2Detail
+} = require('./admin-mini-v2-service');
 
 function createAdminRouter({
     auth,
@@ -56,13 +63,17 @@ function createAdminRouter({
         const ymdRx = /^\d{4}-\d{2}-\d{2}$/;
         const qFrom = String(req.query.from ?? '').trim();
         const qTo = String(req.query.to ?? '').trim();
+        const rawPeriod = String(req.query.period ?? '').toLowerCase();
         try {
+            if (rawPeriod === 'all') {
+                const data = await getDashboardV2ApiPayload({ periodKey: 'all' });
+                return res.json({ ok: true, data });
+            }
             if (qFrom && qTo && ymdRx.test(qFrom) && ymdRx.test(qTo)) {
                 const data = await getDashboardV2ApiPayload({ fromYmd: qFrom, toYmd: qTo });
                 return res.json({ ok: true, data });
             }
-            const raw = String(req.query.period || 'today').toLowerCase();
-            const periodKey = raw === '7d' ? '7d' : 'today';
+            const periodKey = rawPeriod === '7d' ? '7d' : 'today';
             const data = await getDashboardV2ApiPayload({ periodKey });
             return res.json({ ok: true, data });
         } catch (e) {
@@ -201,6 +212,70 @@ function createAdminRouter({
         const data = await adminRepository.getClient(req.params.telegramId);
         if (!data) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
         res.json({ ok: true, data });
+    });
+
+    router.get('/orders-v2', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_ORDERS_VIEW), async (req, res) => {
+        try {
+            const { range, periodApi } = resolveDashboardLikeRangeFromQuery(req.query || {});
+            const orders = await listOrdersV2ForRange(range);
+            return res.json({
+                ok: true,
+                data: {
+                    period: periodApi,
+                    range: {
+                        from: range.periodStartIso,
+                        to: range.periodEndIso,
+                        label: `${range.labelFrom} — ${range.labelTo}`
+                    },
+                    orders
+                }
+            });
+        } catch (e) {
+            const msg = String((e && e.message) || e || '');
+            if (msg === 'BAD_YMD' || msg === 'RANGE_INVERTED' || msg === 'RANGE_TOO_WIDE') {
+                return res.status(400).json({ ok: false, error: 'ORDERS_V2_BAD_RANGE', detail: msg });
+            }
+            console.error('[Admin] orders-v2 failed:', msg);
+            return res.status(500).json({ ok: false, error: 'ORDERS_V2_FAILED' });
+        }
+    });
+
+    router.get('/clients-v2', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_CLIENTS_VIEW), async (req, res) => {
+        const kind = String(req.query.kind || 'new').toLowerCase();
+        try {
+            if (kind === 'all') {
+                const clients = await listClientsAllV2();
+                return res.json({ ok: true, data: { kind: 'all', clients } });
+            }
+            const { range, periodApi } = resolveDashboardLikeRangeFromQuery(req.query || {});
+            const clients = await listClientsNewForRange(range);
+            return res.json({
+                ok: true,
+                data: {
+                    kind: 'new',
+                    period: periodApi,
+                    range: {
+                        from: range.periodStartIso,
+                        to: range.periodEndIso,
+                        label: `${range.labelFrom} — ${range.labelTo}`
+                    },
+                    clients
+                }
+            });
+        } catch (e) {
+            const msg = String((e && e.message) || e || '');
+            if (msg === 'BAD_YMD' || msg === 'RANGE_INVERTED' || msg === 'RANGE_TOO_WIDE') {
+                return res.status(400).json({ ok: false, error: 'CLIENTS_V2_BAD_RANGE', detail: msg });
+            }
+            console.error('[Admin] clients-v2 failed:', msg);
+            return res.status(500).json({ ok: false, error: 'CLIENTS_V2_FAILED' });
+        }
+    });
+
+    router.get('/clients-v2/:telegramId', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_CLIENTS_VIEW), async (req, res) => {
+        const row = await getClientV2Detail(req.params.telegramId);
+        if (!row) return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+        res.json({ ok: true, data: row });
     });
 
     router.get('/topics', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_TOPICS_VIEW), async (req, res) => {

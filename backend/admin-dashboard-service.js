@@ -47,6 +47,9 @@ function formatRuDate(d) {
     return `${pad(dt.getDate())}.${pad(dt.getMonth() + 1)}.${dt.getFullYear()}`;
 }
 
+/** Начало диапазона «за всё время» в отчётах Mini App (локальная дата). */
+const ALL_TIME_REPORTS_START_YMD = '2025-01-01';
+
 /**
  * @param {'today'|'7d'} periodKey
  * @returns {{ periodKey: string, periodStart: Date, periodEnd: Date, periodStartIso: string, periodEndIso: string, labelFrom: string, labelTo: string }}
@@ -130,6 +133,27 @@ function getCustomDashboardPeriodRange(fromYmd, toYmd) {
     };
 }
 
+/**
+ * Пресет «за всё время»: с 01.01.2025 00:00 (локально) до текущего момента.
+ */
+function getAllTimeDashboardPeriodRange(now = new Date()) {
+    const pf = parseYmdPartsStrict(ALL_TIME_REPORTS_START_YMD);
+    if (!pf) {
+        throw new Error('BAD_YMD');
+    }
+    const periodStart = new Date(pf.y, pf.mo - 1, pf.d, 0, 0, 0, 0);
+    const periodEnd = new Date(now.getTime());
+    return {
+        periodKey: 'all',
+        periodStart,
+        periodEnd,
+        periodStartIso: periodStart.toISOString(),
+        periodEndIso: periodEnd.toISOString(),
+        labelFrom: formatRuDate(periodStart),
+        labelTo: formatRuDate(now)
+    };
+}
+
 function isPaidOrderRow(row) {
     return orderPaidRevenueKopecksFromRow(row) > 0;
 }
@@ -145,8 +169,39 @@ function extractItemContribution(item) {
     return { name, qty: q };
 }
 
+function extractItemImageUrl(item) {
+    if (!item || typeof item !== 'object') return null;
+    const keys = ['image_url', 'imageUrl', 'image', 'picture', 'photo', 'thumb', 'thumbnail', 'img'];
+    for (const k of keys) {
+        const v = item[k];
+        if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return null;
+}
+
+function firstImageFromProductsJson(raw) {
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(String(raw));
+        if (Array.isArray(parsed)) {
+            for (const el of parsed) {
+                if (typeof el === 'string' && el.trim()) return el.trim();
+                if (el && typeof el === 'object') {
+                    const u =
+                        el.url || el.src || el.image || el.image_url || el.imageUrl;
+                    if (typeof u === 'string' && u.trim()) return u.trim();
+                }
+            }
+        }
+    } catch (_) {
+        /* ignore */
+    }
+    return null;
+}
+
 function aggregateTopProductsFromOrders(orderRows) {
-    const counts = new Map();
+    /** @type {Map<string, { name: string, qty: number, imageUrl: string | null }>} */
+    const acc = new Map();
     for (const row of orderRows) {
         if (!isPaidOrderRow(row)) continue;
         let items = [];
@@ -159,10 +214,38 @@ function aggregateTopProductsFromOrders(orderRows) {
         for (const it of items) {
             const ext = extractItemContribution(it);
             if (!ext) continue;
-            counts.set(ext.name, (counts.get(ext.name) || 0) + ext.qty);
+            const img = extractItemImageUrl(it);
+            const prev = acc.get(ext.name);
+            if (prev) {
+                prev.qty += ext.qty;
+                if (!prev.imageUrl && img) prev.imageUrl = img;
+            } else {
+                acc.set(ext.name, { name: ext.name, qty: ext.qty, imageUrl: img || null });
+            }
         }
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+    return [...acc.values()].sort((a, b) => b.qty - a.qty).slice(0, 10);
+}
+
+async function hydrateTopProductImages(items) {
+    const missing = items.filter((x) => !x.imageUrl).map((x) => x.name);
+    if (!missing.length) return items;
+    const unique = [...new Set(missing)].slice(0, 30);
+    const ph = unique.map(() => '?').join(',');
+    let rows = [];
+    try {
+        rows = await dbAll(`SELECT name, images_json FROM products WHERE name IN (${ph})`, unique);
+    } catch (_) {
+        return items;
+    }
+    const byName = new Map((rows || []).map((r) => [String(r.name || ''), r]));
+    return items.map((it) => {
+        if (it.imageUrl) return it;
+        const pr = byName.get(it.name);
+        if (!pr) return it;
+        const url = firstImageFromProductsJson(pr.images_json);
+        return url ? { ...it, imageUrl: url } : it;
+    });
 }
 
 /**
@@ -227,12 +310,12 @@ async function fetchDashboardMetricsForRange(range) {
         dbGet(
             `
             SELECT AVG(
-                (julianday(first_response_at) - julianday(created_at)) * 24 * 60
+                (julianday(first_manager_response_at) - julianday(first_client_message_at)) * 24 * 60
             ) AS avg_minutes
-            FROM support_threads
-            WHERE created_at >= ? AND created_at <= ?
-              AND first_response_at IS NOT NULL
-              AND TRIM(first_response_at) <> ''
+            FROM support_response_windows
+            WHERE first_client_message_at >= ? AND first_client_message_at <= ?
+              AND first_manager_response_at IS NOT NULL
+              AND TRIM(first_manager_response_at) <> ''
             `,
             [periodStartIso, periodEndIso]
         ),
@@ -297,7 +380,8 @@ async function fetchDashboardMetricsForRange(range) {
         returnsAfterPayPct = Math.round((paidCancelled / paidDen) * 1000) / 10;
     }
 
-    const topProducts = aggregateTopProductsFromOrders(orderRowsArr);
+    const topRaw = aggregateTopProductsFromOrders(orderRowsArr);
+    const topProducts = await hydrateTopProductImages(topRaw);
 
     return {
         revenueKopecks: revenueK,
@@ -319,20 +403,21 @@ async function fetchDashboardMetricsForRange(range) {
 }
 
 /**
- * @param {'today'|'7d'} periodKey
+ * @param {'today'|'7d'|'all'} periodKey
  */
 async function fetchDashboardMetrics(periodKey) {
-    const range = getDashboardPeriodRange(periodKey);
+    const range =
+        periodKey === 'all' ? getAllTimeDashboardPeriodRange() : getDashboardPeriodRange(periodKey);
     const metrics = await fetchDashboardMetricsForRange(range);
     return { range, ...metrics };
 }
 
 /**
  * Ответ Mini App для GET /api/admin/dashboard-v2:
- * (?period=today|7d) или (?from=YYYY-MM-DD&to=YYYY-MM-DD).
+ * (?period=today|7d|all) или (?from=YYYY-MM-DD&to=YYYY-MM-DD).
  */
 async function getDashboardV2ApiPayload(opts) {
-    /** @type {ReturnType<typeof getDashboardPeriodRange>|ReturnType<typeof getCustomDashboardPeriodRange>} */
+    /** @type {ReturnType<typeof getDashboardPeriodRange>|ReturnType<typeof getCustomDashboardPeriodRange>|ReturnType<typeof getAllTimeDashboardPeriodRange>} */
     let range;
     /** @type {string} */
     let periodApi;
@@ -341,8 +426,9 @@ async function getDashboardV2ApiPayload(opts) {
         range = getCustomDashboardPeriodRange(String(opts.fromYmd).trim(), String(opts.toYmd).trim());
         periodApi = 'custom';
     } else {
-        const pk = opts === '7d' || (opts && opts.periodKey === '7d') ? '7d' : 'today';
-        range = getDashboardPeriodRange(pk);
+        const pkRaw = opts === '7d' || (opts && opts.periodKey === '7d') ? '7d' : (opts && opts.periodKey === 'all' ? 'all' : 'today');
+        const pk = pkRaw === 'all' ? 'all' : pkRaw === '7d' ? '7d' : 'today';
+        range = pk === 'all' ? getAllTimeDashboardPeriodRange() : getDashboardPeriodRange(pk);
         periodApi = pk;
     }
 
@@ -369,10 +455,21 @@ async function getDashboardV2ApiPayload(opts) {
             abandonedCarts: null,
             paidCancelledPercent: m.returnsAfterPayPct
         },
-        topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map(([name, qty]) => ({
-            name: String(name || ''),
-            quantity: Math.round(Number(qty || 0))
-        })),
+        topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map((row) => {
+            if (Array.isArray(row)) {
+                const [name, qty] = row;
+                return {
+                    name: String(name || ''),
+                    quantity: Math.round(Number(qty || 0)),
+                    image_url: null
+                };
+            }
+            return {
+                name: String(row.name || ''),
+                quantity: Math.round(Number(row.qty || row.quantity || 0)),
+                image_url: row.imageUrl || row.image_url || null
+            };
+        }),
         sources: []
     };
 }
@@ -382,6 +479,8 @@ module.exports = {
     isAdminTelegramId,
     getDashboardPeriodRange,
     getCustomDashboardPeriodRange,
+    getAllTimeDashboardPeriodRange,
+    ALL_TIME_REPORTS_START_YMD,
     fetchDashboardMetricsForRange,
     fetchDashboardMetrics,
     getDashboardV2ApiPayload,

@@ -10,7 +10,8 @@ const SUPPORT_THREAD_DENORM_COLUMNS = Object.freeze([
     ['waiting_for_staff', 'INTEGER DEFAULT 0'],
     ['last_client_message_at', 'TEXT'],
     ['last_staff_reply_at', 'TEXT'],
-    ['last_message_direction', 'TEXT']
+    ['last_message_direction', 'TEXT'],
+    ['last_client_notification_at', 'TEXT']
 ]);
 
 function logInfo(logger, event, payload = {}) {
