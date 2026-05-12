@@ -32,12 +32,27 @@ async function upsertCustomerOrderHttp(msHttp, { msOrderId, payload }) {
     const id = msOrderId && String(msOrderId).trim() ? String(msOrderId).trim() : null;
 
     if (!id) {
+        console.error(
+            '[MoySklad] customerorder_http_attempt',
+            JSON.stringify({
+                method: 'POST',
+                path: '/entity/customerorder'
+            })
+        );
         const res = await msHttp.post('/entity/customerorder', payload);
         return { outcome: 'created', msOrder: res.data };
     }
 
     try {
-        await msHttp.put(`/entity/customerorder/${id}`, payload);
+        const putPath = `/entity/customerorder/${id}`;
+        console.error(
+            '[MoySklad] customerorder_http_attempt',
+            JSON.stringify({
+                method: 'PUT',
+                path: putPath
+            })
+        );
+        await msHttp.put(putPath, payload);
         return { outcome: 'updated', msOrderId: id };
     } catch (e) {
         if (!isStaleCustomerOrderNotFoundError(e)) throw e;

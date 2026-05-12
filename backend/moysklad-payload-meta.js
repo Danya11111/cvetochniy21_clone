@@ -164,23 +164,36 @@ function isMetaLikePlainObject(v) {
     const href = typeof hrefRaw === 'string' ? hrefRaw.trim() : '';
     const mhRaw = v.metadataHref;
     const mh = typeof mhRaw === 'string' ? mhRaw.trim() : '';
+    const dhRaw = v.downloadHref;
+    const dh = typeof dhRaw === 'string' ? dhRaw.trim() : '';
 
     if (mh.length > 0) return true;
 
+    // Относительные href в ответах API («entity/...» без домена)
     if (
         href.length > 0 &&
         (href.includes('/entity/') ||
             href.includes('/metadata/') ||
+            href.startsWith('entity/') ||
             href.toLowerCase().includes('api.moysklad.ru'))
     ) {
         return true;
     }
 
     const mt = v.mediaType;
+    const mtStr = typeof mt === 'string' ? mt.toLowerCase() : '';
+    if (mtStr.includes('json') && (href.length > 0 || mh.length > 0)) {
+        return true;
+    }
+    // мета файлов/изображений в разметке МС
+    if (dh.length > 0 && (dh.includes('/download/') || dh.includes('moysklad'))) {
+        return true;
+    }
+
+    // meta-подобный фрагмент: есть type и ссылка не из белого списка полей заказа
     if (
-        typeof mt === 'string' &&
-        mt.toLowerCase().includes('json') &&
-        href.length > 0
+        Object.prototype.hasOwnProperty.call(v, 'type') &&
+        (href.length > 0 || mh.length > 0 || dh.length > 0)
     ) {
         return true;
     }
@@ -220,6 +233,9 @@ function snapshotMetaLikeForDebug(node, path) {
     const hasMediaType = Object.prototype.hasOwnProperty.call(node, 'mediaType');
     const typeStr = node.type === undefined || node.type === null ? '' : String(node.type).trim();
     const hasType = typeStr.length > 0;
+    const mtVal = node.mediaType;
+    const mediaType =
+        mtVal === undefined || mtVal === null ? null : String(mtVal);
 
     return {
         path,
@@ -230,6 +246,7 @@ function snapshotMetaLikeForDebug(node, path) {
         type: hasType ? typeStr : null,
         href: hasHref ? abbreviateHrefForMetaDebug(node.href) : null,
         metadataHref: hasMetadataHref ? abbreviateHrefForMetaDebug(node.metadataHref) : null,
+        mediaType: mediaType,
         keys: Object.keys(node).sort()
     };
 }
@@ -295,6 +312,88 @@ function collectMetaLikeObjectsMissingType(root, basePath = 'payload') {
 }
 
 /**
+ * Где href однозначно маппится на тип сущности, а поле type другое — МойСклад часто даёт 412/3000.
+ * @param {unknown} root
+ * @param {string} [basePath]
+ * @returns {{ path: string, type: string, inferredFromHref: string }[]}
+ */
+function collectMetaLikeHrefTypeMismatches(root, basePath = 'payload') {
+    const out = [];
+
+    const walk = (node, p) => {
+        if (!node || typeof node !== 'object') return;
+
+        if (Array.isArray(node)) {
+            for (let i = 0; i < node.length; i++) walk(node[i], `${p}[${i}]`);
+            return;
+        }
+
+        for (const k of Object.keys(node)) {
+            walk(node[k], `${p}.${k}`);
+        }
+
+        if (isMetaLikePlainObject(node) && metaLikeHasNonEmptyType(node)) {
+            const href = typeof node.href === 'string' ? node.href.trim() : '';
+            if (!href) return;
+            const inferred = inferMetaTypeByHref(href);
+            if (!inferred) return;
+            const t = String(node.type || '').trim();
+            if (t && inferred.toLowerCase() !== t.toLowerCase()) {
+                out.push({ path: p, type: t, inferredFromHref: inferred });
+            }
+        }
+    };
+
+    walk(root, basePath);
+    return out;
+}
+
+/**
+ * Рекурсивно убирает из копии payload поля с PII для однострочного лога тела запроса.
+ * @param {unknown} input
+ * @returns {unknown}
+ */
+function redactCustomerOrderWirePayloadForLog(input) {
+    try {
+        const root =
+            input && typeof input === 'object'
+                ? JSON.parse(JSON.stringify(input))
+                : input;
+        return redactNode(root);
+    } catch (_) {
+        return { error: 'redact_failed' };
+    }
+}
+
+function redactNode(node) {
+    if (node === null || node === undefined) return node;
+    if (typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map(redactNode);
+
+    const out = {};
+    for (const k of Object.keys(node)) {
+        if (k === 'description' || k === 'shipmentAddress') {
+            out[k] =
+                typeof node[k] === 'string' && node[k].length > 0 ? '[REDACTED]' : node[k];
+            continue;
+        }
+        if (k === 'attributes' && Array.isArray(node[k])) {
+            out[k] = node[k].map(a => {
+                if (!a || typeof a !== 'object') return a;
+                const c = { ...a };
+                if (typeof c.value === 'string' && c.value.length > 0) {
+                    c.value = '[REDACTED]';
+                }
+                return c;
+            });
+            continue;
+        }
+        out[k] = redactNode(node[k]);
+    }
+    return out;
+}
+
+/**
  * JSON как у axios: без undefined, без циклов (customerorder payload — дерево).
  * @param {object} payload
  * @returns {object}
@@ -304,22 +403,80 @@ function serializeMoySkladJsonPayload(payload) {
 }
 
 /**
+ * Структурированный обход meta-like; пишем в stderr — в journald видно при захвате только stderr.
  * @param {object} p
  * @param {unknown} p.orderId
  * @param {boolean} p.createPayment
  * @param {object[]} p.entries
- * @param {{ log?: Function }} [p.logger]
+ * @param {{ error?: Function }} [p.logger]
  */
 function logPayloadMetaDebug({ orderId, createPayment, entries, logger = console }) {
-    const log = typeof logger.log === 'function' ? logger.log.bind(logger) : console.log.bind(console);
-    log(
-        '[MoySklad] payload_meta_debug',
-        JSON.stringify({
-            orderId: orderId != null ? orderId : null,
-            createPayment: !!createPayment,
-            entries
-        })
-    );
+    const logErr =
+        typeof logger.error === 'function' ? logger.error.bind(logger) : console.error.bind(console);
+    const lineObj = {
+        orderId: orderId != null ? orderId : null,
+        createPayment: !!createPayment,
+        entriesCount: Array.isArray(entries) ? entries.length : 0,
+        entries
+    };
+    try {
+        logErr('[MoySklad] payload_meta_debug', JSON.stringify(lineObj));
+    } catch (e) {
+        logErr(
+            '[MoySklad] payload_meta_debug_failed',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                createPayment: !!createPayment,
+                reason: e && e.message ? e.message : String(e)
+            })
+        );
+    }
+}
+
+/**
+ * Одна строка: wire payload без PII (для сравнения с тем, что уходит в axios).
+ * @param {object} p
+ * @param {unknown} p.orderId
+ * @param {boolean} p.createPayment
+ * @param {string} p.httpMethod
+ * @param {boolean} p.hasMsOrderId
+ * @param {object} p.wirePayload
+ * @param {number} [p.maxLen]
+ */
+function logPayloadWireRedactedJson({
+    orderId,
+    createPayment,
+    httpMethod,
+    hasMsOrderId,
+    wirePayload,
+    maxLen = 20000,
+    logger = console
+}) {
+    const logErr =
+        typeof logger.error === 'function' ? logger.error.bind(logger) : console.error.bind(console);
+    try {
+        const redacted = redactCustomerOrderWirePayloadForLog(wirePayload);
+        let s = JSON.stringify(redacted);
+        if (s.length > maxLen) s = `${s.slice(0, maxLen)}…(truncated ${s.length})`;
+        logErr(
+            '[MoySklad] payload_wire_redacted_json',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                createPayment: !!createPayment,
+                httpMethod: String(httpMethod || ''),
+                hasMsOrderId: !!hasMsOrderId,
+                json: s
+            })
+        );
+    } catch (e) {
+        logErr(
+            '[MoySklad] payload_wire_redacted_json_failed',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                reason: e && e.message ? e.message : String(e)
+            })
+        );
+    }
 }
 
 /**
@@ -381,9 +538,12 @@ module.exports = {
     metaOrNull,
     collectMetaTypeMissingPaths,
     collectMetaLikeObjectsMissingType,
+    collectMetaLikeHrefTypeMismatches,
     buildPayloadMetaDebugEntries,
     serializeMoySkladJsonPayload,
     logPayloadMetaDebug,
+    logPayloadWireRedactedJson,
+    redactCustomerOrderWirePayloadForLog,
     filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
     summarizeCustomerOrderPayloadForLog,

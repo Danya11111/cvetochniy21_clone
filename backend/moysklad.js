@@ -6,9 +6,11 @@ const {
     metaOrNull,
     collectMetaTypeMissingPaths,
     collectMetaLikeObjectsMissingType,
+    collectMetaLikeHrefTypeMismatches,
     buildPayloadMetaDebugEntries,
     serializeMoySkladJsonPayload,
     logPayloadMetaDebug,
+    logPayloadWireRedactedJson,
     filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
     logPayloadMetaTypeMissing
@@ -856,6 +858,13 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
     // await debugGetCustomerOrderFull('9ae2afa0-dedc-11f0-0a80-0494007c7b5f');
 
     console.log('[MoySklad] Upsert order', order.id, 'createPayment=', createPayment);
+    console.error(
+        '[MoySklad] upsert_enter',
+        JSON.stringify({
+            orderId: order.id != null ? order.id : null,
+            createPayment: !!createPayment
+        })
+    );
 
     // NEW: товары доставки в МС (UUID или externalCode можно хранить в config.js)
     const {
@@ -1354,7 +1363,24 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
             payload: wirePayload
         });
         throw new Error(
-            `[MoySklad] customerorder payload: meta without type at ${wireViolations.join('; ')}`
+            `Refusing to upsert customerorder: broken meta-like objects in wire payload (${wireViolations.join('; ')})`
+        );
+    }
+
+    const hrefTypeMismatches = collectMetaLikeHrefTypeMismatches(wirePayload);
+    if (hrefTypeMismatches.length) {
+        console.error(
+            '[MoySklad] payload_meta_href_type_mismatch',
+            JSON.stringify({
+                orderId: order.id,
+                createPayment: !!createPayment,
+                mismatches: hrefTypeMismatches
+            })
+        );
+        throw new Error(
+            `Refusing to upsert customerorder: broken meta-like objects in wire payload (href/type mismatch: ${hrefTypeMismatches
+                .map(m => `${m.path} type=${m.type} inferredFromHref=${m.inferredFromHref}`)
+                .join('; ')})`
         );
     }
 
@@ -1363,6 +1389,27 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
             '[MoySklad] Positions are empty after sanitizing meta. Refuse to create empty customer order.'
         );
     }
+
+    const msIdTrimmed = msOrderId && String(msOrderId).trim() ? String(msOrderId).trim() : '';
+    const customerorderHttpMethod = msIdTrimmed ? 'PUT' : 'POST';
+
+    logPayloadWireRedactedJson({
+        orderId: order.id,
+        createPayment: !!createPayment,
+        httpMethod: customerorderHttpMethod,
+        hasMsOrderId: !!msIdTrimmed,
+        wirePayload
+    });
+
+    console.error(
+        '[MoySklad] customerorder_http_sending',
+        JSON.stringify({
+            orderId: order.id,
+            createPayment: !!createPayment,
+            method: customerorderHttpMethod,
+            msPath: msIdTrimmed ? `/entity/customerorder/${msIdTrimmed}` : '/entity/customerorder'
+        })
+    );
 
     let upsertResult = await upsertCustomerOrderHttp(ms, {
         msOrderId,

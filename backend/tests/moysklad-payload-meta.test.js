@@ -5,13 +5,16 @@ const {
     inferMetaTypeByHref,
     collectMetaTypeMissingPaths,
     collectMetaLikeObjectsMissingType,
+    collectMetaLikeHrefTypeMismatches,
+    isMetaLikePlainObject,
     pruneInvalidMetaKeys,
     metaOrNull,
     fixMeta,
     isValidMeta,
     buildPayloadMetaDebugEntries,
     serializeMoySkladJsonPayload,
-    filterAttributesWithMissingValue
+    filterAttributesWithMissingValue,
+    redactCustomerOrderWirePayloadForLog
 } = require('../moysklad-payload-meta');
 
 async function test(name, fn) {
@@ -120,6 +123,42 @@ async function test(name, fn) {
         const f = filterAttributesWithMissingValue(attrs);
         assert.strictEqual(f.length, 1);
         assert.strictEqual(f[0].value, 'x');
+    });
+
+    await test('collectMetaLikeHrefTypeMismatches: product href + type service', () => {
+        const payload = {
+            positions: [
+                {
+                    assortment: {
+                        meta: {
+                            href: 'https://api.moysklad.ru/api/remap/1.2/entity/product/p1',
+                            type: 'service',
+                            mediaType: 'application/json'
+                        }
+                    }
+                }
+            ]
+        };
+        const m = collectMetaLikeHrefTypeMismatches(payload);
+        assert.strictEqual(m.length, 1);
+        assert.ok(m[0].path.includes('assortment.meta'));
+    });
+
+    await test('redactCustomerOrderWirePayloadForLog: description и строковые value атрибутов', () => {
+        const r = redactCustomerOrderWirePayloadForLog({
+            description: 'секрет',
+            attributes: [{ meta: { href: 'h', type: 'x', mediaType: 'application/json' }, value: 'тайна' }]
+        });
+        assert.strictEqual(r.description, '[REDACTED]');
+        assert.strictEqual(r.attributes[0].value, '[REDACTED]');
+    });
+
+    await test('entity/… относительный href считается meta-like', () => {
+        const o = {
+            x: { href: 'entity/product/uuid-uuid-uuid-uuid', mediaType: 'application/json', type: 'product' }
+        };
+        assert.strictEqual(isMetaLikePlainObject(o.x), true);
+        assert.strictEqual(collectMetaLikeObjectsMissingType(o).length, 0);
     });
 
     await test('attributes[*].value.meta без type — meta-like violation', () => {
