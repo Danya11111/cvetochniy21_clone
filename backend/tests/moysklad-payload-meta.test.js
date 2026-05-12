@@ -4,10 +4,14 @@ const assert = require('assert');
 const {
     inferMetaTypeByHref,
     collectMetaTypeMissingPaths,
+    collectMetaLikeObjectsMissingType,
     pruneInvalidMetaKeys,
     metaOrNull,
     fixMeta,
-    isValidMeta
+    isValidMeta,
+    buildPayloadMetaDebugEntries,
+    serializeMoySkladJsonPayload,
+    filterAttributesWithMissingValue
 } = require('../moysklad-payload-meta');
 
 async function test(name, fn) {
@@ -50,12 +54,10 @@ async function test(name, fn) {
         assert.ok(m && m.type === 'counterparty' && m.href.includes('/entity/counterparty/'));
     });
 
-    await test('collectMetaTypeMissingPaths: находит отсутствующий type у вложенного meta', () => {
+    await test('collectMetaLikeObjectsMissingType: ловит href без type даже когда родитель не .meta', () => {
         const payload = {
             positions: [
                 {
-                    quantity: 1,
-                    price: 100,
                     assortment: {
                         meta: {
                             href: 'https://api.moysklad.ru/api/remap/1.2/entity/product/x',
@@ -65,8 +67,81 @@ async function test(name, fn) {
                 }
             ]
         };
-        const paths = collectMetaTypeMissingPaths(payload);
-        assert.ok(paths.some(p => p.includes('positions[0].assortment.meta.type')));
+        const paths = collectMetaLikeObjectsMissingType(payload);
+        assert.ok(paths.includes('payload.positions[0].assortment.meta'));
+        assert.strictEqual(collectMetaTypeMissingPaths(payload).length, 1);
+        assert.ok(
+            collectMetaTypeMissingPaths(payload).some(p => p.includes('positions[0].assortment.meta.type'))
+        );
+    });
+
+    await test('buildPayloadMetaDebugEntries: snapshot полей без лишних данных', () => {
+        const payload = {
+            organization: {
+                meta: {
+                    href: 'https://api.moysklad.ru/api/remap/1.2/entity/organization/u1',
+                    type: 'organization',
+                    mediaType: 'application/json',
+                    downloadHref: 'http://evil.example/leak'
+                }
+            }
+        };
+        const entries = buildPayloadMetaDebugEntries(payload);
+        assert.strictEqual(entries.length, 1);
+        assert.strictEqual(entries[0].path, 'payload.organization.meta');
+        assert.strictEqual(entries[0].hasType, true);
+        assert.ok(Array.isArray(entries[0].keys));
+        assert.ok(entries[0].keys.includes('downloadHref'));
+    });
+
+    await test('serializeMoySkladJsonPayload: убирает undefined', () => {
+        const o = serializeMoySkladJsonPayload({ a: 1, b: undefined, c: { d: undefined } });
+        assert.strictEqual(JSON.stringify(o), JSON.stringify({ a: 1, c: {} }));
+    });
+
+    await test('filterAttributesWithMissingValue: убирает атрибуты только с meta', () => {
+        const attrs = [
+            {
+                meta: {
+                    href: 'https://api.moysklad.ru/api/remap/1.2/entity/customerorder/metadata/attributes/aa',
+                    type: 'attributemetadata',
+                    mediaType: 'application/json'
+                }
+            },
+            {
+                meta: {
+                    href: 'https://api.moysklad.ru/api/remap/1.2/entity/customerorder/metadata/attributes/bb',
+                    type: 'attributemetadata',
+                    mediaType: 'application/json'
+                },
+                value: 'x'
+            }
+        ];
+        const f = filterAttributesWithMissingValue(attrs);
+        assert.strictEqual(f.length, 1);
+        assert.strictEqual(f[0].value, 'x');
+    });
+
+    await test('attributes[*].value.meta без type — meta-like violation', () => {
+        const payload = {
+            attributes: [
+                {
+                    meta: {
+                        href: 'https://api.moysklad.ru/api/remap/1.2/entity/customerorder/metadata/attributes/a1',
+                        type: 'attributemetadata',
+                        mediaType: 'application/json'
+                    },
+                    value: {
+                        meta: {
+                            href: 'https://api.moysklad.ru/api/remap/1.2/entity/customentity/e1',
+                            mediaType: 'application/json'
+                        }
+                    }
+                }
+            ]
+        };
+        const v = collectMetaLikeObjectsMissingType(payload);
+        assert.ok(v.some(p => p.includes('payload.attributes[0].value.meta')));
     });
 
     await test('pruneInvalidMetaKeys: удаляет целиком невалидный meta (в т.ч. «осиротевший» metadataHref)', () => {
@@ -128,6 +203,7 @@ async function test(name, fn) {
             deliveryPlannedMoment: null
         };
         assert.strictEqual(collectMetaTypeMissingPaths(payload).length, 0);
+        assert.strictEqual(collectMetaLikeObjectsMissingType(payload).length, 0);
         pruneInvalidMetaKeys(payload);
         assert.strictEqual(collectMetaTypeMissingPaths(payload).length, 0);
         assert.strictEqual(payload.positions.length, 1);

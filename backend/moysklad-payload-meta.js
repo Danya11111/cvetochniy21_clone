@@ -152,6 +152,190 @@ function pruneInvalidMetaKeys(root) {
     visit(root);
 }
 
+/**
+ * Объект похож на Meta МойСклад (нужен type + href/metadataHref для 1.2).
+ * Не путать с произвольными JSON-объектами.
+ * @param {unknown} v
+ */
+function isMetaLikePlainObject(v) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+
+    const hrefRaw = v.href;
+    const href = typeof hrefRaw === 'string' ? hrefRaw.trim() : '';
+    const mhRaw = v.metadataHref;
+    const mh = typeof mhRaw === 'string' ? mhRaw.trim() : '';
+
+    if (mh.length > 0) return true;
+
+    if (
+        href.length > 0 &&
+        (href.includes('/entity/') ||
+            href.includes('/metadata/') ||
+            href.toLowerCase().includes('api.moysklad.ru'))
+    ) {
+        return true;
+    }
+
+    const mt = v.mediaType;
+    if (
+        typeof mt === 'string' &&
+        mt.toLowerCase().includes('json') &&
+        href.length > 0
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+function metaLikeHasNonEmptyType(node) {
+    const t = node && node.type;
+    return t !== undefined && t !== null && String(t).trim().length > 0;
+}
+
+/** Для логов: вид href без домена и query (без PII). */
+function abbreviateHrefForMetaDebug(href) {
+    if (!href || typeof href !== 'string') return null;
+    try {
+        let s = href.trim();
+        s = s.replace(/^https?:\/\/api\.moysklad\.ru\/api\/remap\/1\.2/i, '');
+        s = s.replace(/^https?:\/\/[^/]+/i, '');
+        const q = s.indexOf('?');
+        if (q >= 0) s = s.slice(0, q);
+        return s.length > 120 ? `${s.slice(0, 120)}…` : s;
+    } catch (_) {
+        return '[href]';
+    }
+}
+
+/**
+ * Снимок meta-like узла для [MoySklad] payload_meta_debug (без телефонов, имён, адресов).
+ * @param {object} node
+ * @param {string} path
+ */
+function snapshotMetaLikeForDebug(node, path) {
+    const hasHref = typeof node.href === 'string' && node.href.trim().length > 0;
+    const hasMetadataHref =
+        typeof node.metadataHref === 'string' && node.metadataHref.trim().length > 0;
+    const hasMediaType = Object.prototype.hasOwnProperty.call(node, 'mediaType');
+    const typeStr = node.type === undefined || node.type === null ? '' : String(node.type).trim();
+    const hasType = typeStr.length > 0;
+
+    return {
+        path,
+        hasHref,
+        hasMetadataHref,
+        hasMediaType,
+        hasType,
+        type: hasType ? typeStr : null,
+        href: hasHref ? abbreviateHrefForMetaDebug(node.href) : null,
+        metadataHref: hasMetadataHref ? abbreviateHrefForMetaDebug(node.metadataHref) : null,
+        keys: Object.keys(node).sort()
+    };
+}
+
+/**
+ * Обходит дерево JSON и собирает снимки всех meta-like объектов (в т.ч. value.meta, assortment.meta).
+ * @param {unknown} root
+ * @param {string} [basePath]
+ * @returns {object[]}
+ */
+function buildPayloadMetaDebugEntries(root, basePath = 'payload') {
+    const entries = [];
+
+    const walk = (node, p) => {
+        if (!node || typeof node !== 'object') return;
+
+        if (Array.isArray(node)) {
+            for (let i = 0; i < node.length; i++) walk(node[i], `${p}[${i}]`);
+            return;
+        }
+
+        for (const k of Object.keys(node)) {
+            walk(node[k], `${p}.${k}`);
+        }
+
+        if (isMetaLikePlainObject(node)) {
+            entries.push(snapshotMetaLikeForDebug(node, p));
+        }
+    };
+
+    walk(root, basePath);
+    return entries;
+}
+
+/**
+ * Пути к meta-like объектам без непустого type (то, что даёт MS 412/3000).
+ * @param {unknown} root
+ * @param {string} [basePath]
+ * @returns {string[]}
+ */
+function collectMetaLikeObjectsMissingType(root, basePath = 'payload') {
+    const out = [];
+
+    const walk = (node, p) => {
+        if (!node || typeof node !== 'object') return;
+
+        if (Array.isArray(node)) {
+            for (let i = 0; i < node.length; i++) walk(node[i], `${p}[${i}]`);
+            return;
+        }
+
+        for (const k of Object.keys(node)) {
+            walk(node[k], `${p}.${k}`);
+        }
+
+        if (isMetaLikePlainObject(node) && !metaLikeHasNonEmptyType(node)) {
+            out.push(p);
+        }
+    };
+
+    walk(root, basePath);
+    return out;
+}
+
+/**
+ * JSON как у axios: без undefined, без циклов (customerorder payload — дерево).
+ * @param {object} payload
+ * @returns {object}
+ */
+function serializeMoySkladJsonPayload(payload) {
+    return JSON.parse(JSON.stringify(payload));
+}
+
+/**
+ * @param {object} p
+ * @param {unknown} p.orderId
+ * @param {boolean} p.createPayment
+ * @param {object[]} p.entries
+ * @param {{ log?: Function }} [p.logger]
+ */
+function logPayloadMetaDebug({ orderId, createPayment, entries, logger = console }) {
+    const log = typeof logger.log === 'function' ? logger.log.bind(logger) : console.log.bind(console);
+    log(
+        '[MoySklad] payload_meta_debug',
+        JSON.stringify({
+            orderId: orderId != null ? orderId : null,
+            createPayment: !!createPayment,
+            entries
+        })
+    );
+}
+
+/**
+ * Атрибуты без value после prune бессмысленны для МС и могут ломать разбор.
+ * @param {unknown} attributes
+ * @returns {unknown}
+ */
+function filterAttributesWithMissingValue(attributes) {
+    if (!Array.isArray(attributes)) return attributes;
+    return attributes.filter(a => {
+        if (!a || !isValidMeta(a.meta)) return false;
+        if (a.value === undefined || a.value === null) return false;
+        return true;
+    });
+}
+
 function summarizeCustomerOrderPayloadForLog(payload) {
     if (!payload || typeof payload !== 'object') {
         return { positions: 0, attributes: 0, hasOrg: false, hasAgent: false, hasSalesChannel: false };
@@ -192,9 +376,15 @@ function logPayloadMetaTypeMissing({ orderId, createPayment, paths, payload, log
 module.exports = {
     inferMetaTypeByHref,
     isValidMeta,
+    isMetaLikePlainObject,
     fixMeta,
     metaOrNull,
     collectMetaTypeMissingPaths,
+    collectMetaLikeObjectsMissingType,
+    buildPayloadMetaDebugEntries,
+    serializeMoySkladJsonPayload,
+    logPayloadMetaDebug,
+    filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
     summarizeCustomerOrderPayloadForLog,
     logPayloadMetaTypeMissing

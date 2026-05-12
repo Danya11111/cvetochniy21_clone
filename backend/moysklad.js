@@ -1,11 +1,15 @@
 const axios = require('axios');
 const db = require('./db');
 const {
-    inferMetaTypeByHref,
     isValidMeta,
     fixMeta,
     metaOrNull,
     collectMetaTypeMissingPaths,
+    collectMetaLikeObjectsMissingType,
+    buildPayloadMetaDebugEntries,
+    serializeMoySkladJsonPayload,
+    logPayloadMetaDebug,
+    filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
     logPayloadMetaTypeMissing
 } = require('./moysklad-payload-meta');
@@ -49,6 +53,7 @@ function dropInvalidMeta(obj) {
                 delete a.value; // выбрасываем значение, иначе MS падает
             }
         }
+        obj.attributes = filterAttributesWithMissingValue(obj.attributes);
     }
 
     // positions assortment
@@ -964,6 +969,8 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         );
     });
 
+    const hasExistingMsOrder = !!(existing?.ms_id && String(existing.ms_id).trim());
+
     // --- 2) позиции: href + meta.type согласованы с фактической сущностью в МС ---
     const _lineAssortmentCache =
         sendOrderToMoySklad.__lineAssortmentCache || (sendOrderToMoySklad.__lineAssortmentCache = new Map());
@@ -1290,10 +1297,10 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 // - самовывоз: ЯВНО чистим поле, иначе MS оставит старое значение
     if (deliveryPlannedMoment) {
         payload.deliveryPlannedMoment = deliveryPlannedMoment;
-    } else {
+    } else if (hasExistingMsOrder) {
+        // PUT: явно сбрасываем план, иначе МойСклад оставит старое значение
         payload.deliveryPlannedMoment = null;
     }
-
 
     // salesChannel — как у тебя сейчас
     const salesChannelMeta = await getOrCreateSalesChannelMeta();
@@ -1317,20 +1324,41 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
     pruneInvalidMetaKeys(payload);
     dropInvalidMeta(payload);
 
-    const pathsAfterSanitize = collectMetaTypeMissingPaths(payload);
-    if (pathsAfterSanitize.length) {
+    /** JSON ровно как уходит в axios (без undefined) */
+    let wirePayload;
+    try {
+        wirePayload = serializeMoySkladJsonPayload(payload);
+    } catch (e) {
+        throw new Error(`[MoySklad] customerorder payload is not JSON-serializable: ${e.message}`);
+    }
+
+    const debugEntries = buildPayloadMetaDebugEntries(wirePayload);
+    logPayloadMetaDebug({
+        orderId: order.id,
+        createPayment: !!createPayment,
+        entries: debugEntries
+    });
+
+    const wireViolations = [
+        ...new Set([
+            ...collectMetaTypeMissingPaths(wirePayload),
+            ...collectMetaLikeObjectsMissingType(wirePayload)
+        ])
+    ];
+
+    if (wireViolations.length) {
         logPayloadMetaTypeMissing({
             orderId: order.id,
             createPayment: !!createPayment,
-            paths: pathsAfterSanitize,
-            payload
+            paths: wireViolations,
+            payload: wirePayload
         });
         throw new Error(
-            `[MoySklad] customerorder payload: missing meta.type at ${pathsAfterSanitize.join('; ')}`
+            `[MoySklad] customerorder payload: meta without type at ${wireViolations.join('; ')}`
         );
     }
 
-    if (!Array.isArray(payload.positions) || payload.positions.length === 0) {
+    if (!Array.isArray(wirePayload.positions) || wirePayload.positions.length === 0) {
         throw new Error(
             '[MoySklad] Positions are empty after sanitizing meta. Refuse to create empty customer order.'
         );
@@ -1338,7 +1366,7 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
     let upsertResult = await upsertCustomerOrderHttp(ms, {
         msOrderId,
-        payload
+        payload: wirePayload
     });
 
     if (upsertResult.outcome === 'stale_put') {
@@ -1347,7 +1375,7 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
                 orderId: order.id,
                 staleMsId: upsertResult.staleMsOrderId,
                 staleMsName: existing?.ms_name || null,
-                payload,
+                payload: wirePayload,
                 createPayment,
                 statusCode: upsertResult.statusCode,
                 msErrorCode: upsertResult.msErrorCode
