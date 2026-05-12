@@ -4,3 +4,4 @@ backend/database.sqlite
 .idea
 .idea/
 backend/data/promotion-uploads/
+.env
