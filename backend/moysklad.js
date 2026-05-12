@@ -1,6 +1,15 @@
 const axios = require('axios');
 const db = require('./db');
 const {
+    inferMetaTypeByHref,
+    isValidMeta,
+    fixMeta,
+    metaOrNull,
+    collectMetaTypeMissingPaths,
+    pruneInvalidMetaKeys,
+    logPayloadMetaTypeMissing
+} = require('./moysklad-payload-meta');
+const {
     MOYSKLAD_TOKEN,
     MOYSKLAD_ORGANIZATION_NAME,
     MOYSKLAD_ROOT_FOLDER_NAME,
@@ -27,8 +36,6 @@ const ms = axios.create({
 });
 
 function dropInvalidMeta(obj) {
-    const isValidMeta = (m) => m && typeof m === 'object' && String(m.type || '').trim() && String(m.href || '').trim();
-
     // верхний уровень
     if (obj.salesChannel && !isValidMeta(obj.salesChannel.meta)) delete obj.salesChannel;
     if (obj.organization && !isValidMeta(obj.organization.meta)) delete obj.organization;
@@ -48,119 +55,6 @@ function dropInvalidMeta(obj) {
     if (Array.isArray(obj.positions)) {
         obj.positions = obj.positions.filter(p => isValidMeta(p?.assortment?.meta));
     }
-}
-
-function inferMetaTypeByHref(href) {
-    const h = String(href || '');
-
-    if (h.includes('/entity/saleschannel/')) return 'saleschannel';
-    if (h.includes('/entity/organization/')) return 'organization';
-    if (h.includes('/entity/counterparty/')) return 'counterparty';
-    if (h.includes('/entity/product/')) return 'product';
-    if (h.includes('/entity/customerorder/')) return 'customerorder';
-    if (h.includes('/entity/paymentin/')) return 'paymentin';
-
-    // атрибуты заказов (metadata/attributes)
-    if (h.includes('/entity/customerorder/metadata/attributes/')) return 'attributemetadata';
-
-    // custom entity значения (часто /entity/customentity/)
-    if (h.includes('/entity/customentity/')) return 'customentity';
-
-    return null;
-}
-
-function fixMeta(meta, fallbackHref = null) {
-    if (!meta || typeof meta !== 'object') return null;
-
-    const out = { ...meta };
-
-    if (!out.href && fallbackHref) out.href = fallbackHref;
-    if (!out.mediaType) out.mediaType = 'application/json';
-
-    if (!out.type) {
-        const t = inferMetaTypeByHref(out.href);
-        if (t) out.type = t;
-    }
-
-    // если type так и не появился — вернём как есть (ниже мы это залогируем)
-    return out;
-}
-
-function logMissingMetaTypesStrict(obj, path = 'payload') {
-    const bad = [];
-
-    const walk = (v, p) => {
-        if (!v) return;
-
-        if (Array.isArray(v)) {
-            for (let i = 0; i < v.length; i++) walk(v[i], `${p}[${i}]`);
-            return;
-        }
-
-        if (typeof v !== 'object') return;
-
-        // если это meta-объект (есть href или mediaType) — проверяем type
-        const looksLikeMeta = ('href' in v) || ('mediaType' in v) || ('metadataHref' in v);
-
-        if (looksLikeMeta) {
-            const t = v.type;
-            if (t === undefined || t === null || String(t).trim().length === 0) {
-                bad.push({ path: p, href: v.href, type: v.type, mediaType: v.mediaType });
-            }
-        }
-
-        for (const k of Object.keys(v)) {
-            walk(v[k], `${p}.${k}`);
-        }
-    };
-
-    walk(obj, path);
-
-    if (bad.length) {
-        console.error('[MoySklad][META] Found meta without type (or empty type):', bad);
-    } else {
-        console.log('[MoySklad][META] OK: all meta have non-empty type');
-    }
-}
-
-function deepDropInvalidMeta(obj) {
-    const isValidMeta = (m) =>
-        m && typeof m === 'object' &&
-        String(m.type || '').trim() &&
-        String(m.href || '').trim();
-
-    const walk = (v) => {
-        if (!v) return;
-
-        if (Array.isArray(v)) {
-            for (const item of v) walk(item);
-            return;
-        }
-
-        if (typeof v !== 'object') return;
-
-        // если это meta-объект — проверим и "обнулим" если невалидный
-        const looksLikeMeta = ('href' in v) || ('mediaType' in v) || ('metadataHref' in v);
-        if (looksLikeMeta) {
-            if (!isValidMeta(v)) {
-                // удаляем поля так, чтобы MS не видел "meta без type"
-                delete v.href;
-                delete v.type;
-                delete v.mediaType;
-            }
-        }
-
-        // если это объект вида { meta: {...} } — удаляем meta целиком, если невалидная
-        if (v.meta && typeof v.meta === 'object' && !isValidMeta(v.meta)) {
-            delete v.meta;
-        }
-
-        for (const k of Object.keys(v)) {
-            walk(v[k]);
-        }
-    };
-
-    walk(obj);
 }
 
 
@@ -187,9 +81,15 @@ async function getCustomerOrderStateMetaByName(stateName) {
 }
 
 async function markCustomerOrderPaid(msOrderId) {
-    const paidMeta = await getCustomerOrderStateMetaByName('ОПЛАЧЕНО');
-    if (!paidMeta) {
+    const paidMetaRaw = await getCustomerOrderStateMetaByName('ОПЛАЧЕНО');
+    if (!paidMetaRaw) {
         console.warn('[MoySklad] Cannot find state "ОПЛАЧЕНО" in customerorder metadata');
+        return;
+    }
+
+    const paidMeta = metaOrNull(fixMeta(paidMetaRaw));
+    if (!paidMeta) {
+        console.warn('[MoySklad] Cannot normalize state meta for "ОПЛАЧЕНО" (href/type missing)');
         return;
     }
 
@@ -441,13 +341,19 @@ async function createCustomerPaymentForOrder(msOrder, organizationMeta, agentMet
         return;
     }
 
+    const opMeta = metaOrNull(fixMeta(msOrder.meta), 'customerorder');
+    if (!opMeta) {
+        console.warn('[MoySklad] customerorder.meta missing/invalid, skip customerpayment operations meta');
+        return;
+    }
+
     const payload = {
         organization: { meta: organizationMeta },
         agent: { meta: agentMeta },
         sum, // в копейках
         operations: [
             {
-                meta: msOrder.meta // ссылка на заказ покупателя
+                meta: opMeta
             }
         ]
     };
@@ -1002,11 +908,13 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         if (isUuid(key)) {
             meta =
                 (await tryGetById('product', 'product')) ||
+                (await tryGetById('variant', 'variant')) ||
                 (await tryGetById('service', 'service')) ||
                 (await tryGetById('bundle', 'bundle'));
         } else {
             meta =
                 (await tryFindByExternalCode('product', 'product')) ||
+                (await tryFindByExternalCode('variant', 'variant')) ||
                 (await tryFindByExternalCode('service', 'service')) ||
                 (await tryFindByExternalCode('bundle', 'bundle'));
         }
@@ -1014,24 +922,6 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         if (meta) _deliveryAssortmentCache.set(key, meta);
         return meta;
     };
-
-    function metaOrNull(meta, forcedType = null) {
-        if (!meta || typeof meta !== 'object') return null;
-
-        const href = String(meta.href || '').trim();
-        if (!href) return null;
-
-        let type = forcedType ? String(forcedType).trim() : String(meta.type || '').trim();
-
-        if (!type) {
-            const inferred = inferMetaTypeByHref(href);
-            if (inferred) type = inferred;
-        }
-
-        if (!type) return null;
-
-        return { href, type, mediaType: 'application/json' };
-    }
 
     // --- helpers для даты/времени доставки ---
     const parseDateToLocal = (s) => {
@@ -1074,11 +964,54 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         );
     });
 
-    // --- 2) позиции ---
+    // --- 2) позиции: href + meta.type согласованы с фактической сущностью в МС ---
+    const _lineAssortmentCache =
+        sendOrderToMoySklad.__lineAssortmentCache || (sendOrderToMoySklad.__lineAssortmentCache = new Map());
+
+    const resolveLineAssortmentMeta = async rawId => {
+        const id = String(rawId || '').trim();
+        if (!id) return null;
+        if (_lineAssortmentCache.has(id)) return _lineAssortmentCache.get(id);
+
+        const tryTypes = [
+            ['product', 'product'],
+            ['variant', 'variant'],
+            ['bundle', 'bundle'],
+            ['service', 'service']
+        ];
+
+        for (const [entity, type] of tryTypes) {
+            try {
+                const r = await ms.get(`/entity/${entity}/${id}`);
+                const rid = r.data?.id;
+                if (!rid) continue;
+                const meta = {
+                    href: `${MS_BASE_URL}/entity/${entity}/${rid}`,
+                    type,
+                    mediaType: 'application/json'
+                };
+                _lineAssortmentCache.set(id, meta);
+                return meta;
+            } catch (_) {
+                // следующий тип сущности
+            }
+        }
+
+        _lineAssortmentCache.set(id, null);
+        return null;
+    };
+
     const positions = [];
     for (const item of order.items || []) {
         const msId = item.msId || item.ms_id || null;
         if (!msId) continue;
+
+        const assortmentMeta = await resolveLineAssortmentMeta(msId);
+        if (!assortmentMeta) {
+            throw new Error(
+                `[MoySklad] Cannot resolve assortment meta for msId=${String(msId).trim()} (product/variant/bundle/service)`
+            );
+        }
 
         const priceRub = Number(item.price || 0);
         const priceKopecks = Math.round((Number.isFinite(priceRub) ? priceRub : 0) * 100);
@@ -1086,13 +1019,7 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         positions.push({
             quantity: Number(item.quantity || 1),
             price: priceKopecks,
-            assortment: {
-                meta: {
-                    href: `${MS_BASE_URL}/entity/product/${msId}`,
-                    type: 'product',
-                    mediaType: 'application/json'
-                }
-            }
+            assortment: { meta: assortmentMeta }
         });
     }
 
@@ -1342,7 +1269,9 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
     // чистим атрибуты от битых meta
     attributesPayload = attributesPayload.filter(a => a?.meta && a.meta.type && a.meta.href);
     for (const a of attributesPayload) {
-        if (a.value && a.value.meta && (!a.value.meta.type || !a.value.meta.href)) delete a.value;
+        if (a.value && typeof a.value === 'object' && Object.prototype.hasOwnProperty.call(a.value, 'meta')) {
+            if (!isValidMeta(a.value.meta)) delete a.value;
+        }
     }
 
     const payload = {
@@ -1385,11 +1314,27 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
     const msOrderId = existing?.ms_id || null;
 
-    // диагностика + чистка (оставляем как у тебя)
-    logMissingMetaTypesStrict(payload, 'customerorder.payload(before-clean)');
+    pruneInvalidMetaKeys(payload);
     dropInvalidMeta(payload);
-    deepDropInvalidMeta(payload);
-    logMissingMetaTypesStrict(payload, 'customerorder.payload(after-clean)');
+
+    const pathsAfterSanitize = collectMetaTypeMissingPaths(payload);
+    if (pathsAfterSanitize.length) {
+        logPayloadMetaTypeMissing({
+            orderId: order.id,
+            createPayment: !!createPayment,
+            paths: pathsAfterSanitize,
+            payload
+        });
+        throw new Error(
+            `[MoySklad] customerorder payload: missing meta.type at ${pathsAfterSanitize.join('; ')}`
+        );
+    }
+
+    if (!Array.isArray(payload.positions) || payload.positions.length === 0) {
+        throw new Error(
+            '[MoySklad] Positions are empty after sanitizing meta. Refuse to create empty customer order.'
+        );
+    }
 
     let upsertResult = await upsertCustomerOrderHttp(ms, {
         msOrderId,
