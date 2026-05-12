@@ -129,6 +129,7 @@ if (0) {
     void process.env.TELEGRAM_ORDERS_THREAD_ID;
     void process.env.TELEGRAM_BROADCASTS_THREAD_ID;
     void process.env.TELEGRAM_SUPPORT_THREAD_ID;
+    void process.env.MOYSKLAD_SALESCHANNEL_AUTO_CREATE;
 }
 
 const RESOLVED_TELEGRAM_FORUM_GROUP_ID = resolveTelegramForumGroupId();
@@ -148,6 +149,8 @@ function resolveBroadcastGlobalMessagesPerSec() {
 
 module.exports = {
     MOYSKLAD_TOKEN: env('MOYSKLAD_TOKEN', ''),
+    /** true: при отсутствии канала «Telegram Bot» выполнить POST /entity/saleschannel (ломалось 412 без type в МС). По умолчанию false — заказ без salesChannel. */
+    MOYSKLAD_SALESCHANNEL_AUTO_CREATE: envBool('MOYSKLAD_SALESCHANNEL_AUTO_CREATE', false),
     MOYSKLAD_ACCOUNT_ID: env('MOYSKLAD_ACCOUNT_ID', 'your_moysklad_account_id_here'),
     MOYSKLAD_ORGANIZATION_NAME: env('MOYSKLAD_ORGANIZATION_NAME', 'ИП Зайламова Анна Геннадьевна'),
     MOYSKLAD_DEFAULT_AGENT_ID: env('MOYSKLAD_DEFAULT_AGENT_ID', 'ID_КОНТРАГЕНТА_ДЛЯ_ЗАКАЗОВ'),

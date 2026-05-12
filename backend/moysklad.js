@@ -19,13 +19,15 @@ const {
 } = require('./moysklad-payload-meta');
 const {
     createSendOrderHttpTracer,
-    buildCounterpartyCreatePayloadForMoySklad
+    buildCounterpartyCreatePayloadForMoySklad,
+    summarizeAxiosMoySkladError
 } = require('./moysklad-sendorder-trace');
 const {
     MOYSKLAD_TOKEN,
     MOYSKLAD_ORGANIZATION_NAME,
     MOYSKLAD_ROOT_FOLDER_NAME,
-    MOYSKLAD_ROOT_FOLDER_EXTERNAL_CODE
+    MOYSKLAD_ROOT_FOLDER_EXTERNAL_CODE,
+    MOYSKLAD_SALESCHANNEL_AUTO_CREATE
 } = require('./config');
 const {
     upsertCustomerOrderHttp,
@@ -116,7 +118,12 @@ let cachedOrganizationMeta = null;
 
 let cachedSalesChannelMeta = null;
 
-async function getOrCreateSalesChannelMeta(opts = null) {
+/**
+ * Канал продаж «Telegram Bot» для заказа. Кэш на процесс.
+ * @param {null|{ tracer?: object, orderId?: unknown, createPayment?: boolean }} [opts]
+ * @param {null|{ ms?: object, autoCreateSalesChannel?: boolean }} [runtimeDeps] — подмена для тестов (ms, флаг auto-create)
+ */
+async function getOrCreateSalesChannelMeta(opts = null, runtimeDeps = null) {
     if (
         cachedSalesChannelMeta &&
         cachedSalesChannelMeta.href &&
@@ -128,20 +135,54 @@ async function getOrCreateSalesChannelMeta(opts = null) {
     const tracer = opts && opts.tracer;
     const orderId = opts && opts.orderId;
     const createPayment = opts && opts.createPayment;
+    const autoCreate =
+        runtimeDeps && typeof runtimeDeps.autoCreateSalesChannel === 'boolean'
+            ? runtimeDeps.autoCreateSalesChannel
+            : MOYSKLAD_SALESCHANNEL_AUTO_CREATE;
+    const msHttp = runtimeDeps && runtimeDeps.ms ? runtimeDeps.ms : ms;
 
     const name = 'Telegram Bot';
 
     const searchPath = '/entity/saleschannel';
-    const res = tracer
-        ? await tracer.run(
-              'precustomerorder_saleschannel_search',
-              'saleschannel',
-              'GET',
-              searchPath,
-              () => ms.get(searchPath, { params: { filter: `name=${name}` } }),
-              { queryHint: 'filter_name_fixed' }
-          )
-        : await ms.get(searchPath, { params: { filter: `name=${name}` } });
+    const searchLogBase = {
+        orderId: orderId != null ? orderId : null,
+        createPayment: !!createPayment,
+        entity: 'saleschannel',
+        requestPath: searchPath,
+        method: 'GET'
+    };
+    let res;
+    if (tracer) {
+        res = await tracer.run(
+            'precustomerorder_saleschannel_search',
+            'saleschannel',
+            'GET',
+            searchPath,
+            () => msHttp.get(searchPath, { params: { filter: `name=${name}` } }),
+            { queryHint: 'filter_name_fixed' }
+        );
+    } else {
+        console.error(
+            '[MoySklad] precustomerorder_saleschannel_search_started',
+            JSON.stringify(searchLogBase)
+        );
+        try {
+            res = await msHttp.get(searchPath, { params: { filter: `name=${name}` } });
+            console.error(
+                '[MoySklad] precustomerorder_saleschannel_search_succeeded',
+                JSON.stringify({
+                    ...searchLogBase,
+                    statusCode: res.status != null ? res.status : null
+                })
+            );
+        } catch (err) {
+            console.error(
+                '[MoySklad] precustomerorder_saleschannel_search_failed',
+                JSON.stringify({ ...searchLogBase, ...summarizeAxiosMoySkladError(err) })
+            );
+            throw err;
+        }
+    }
 
     const row = res.data?.rows?.[0];
     if (row?.id) {
@@ -151,6 +192,19 @@ async function getOrCreateSalesChannelMeta(opts = null) {
             mediaType: 'application/json'
         };
         return cachedSalesChannelMeta;
+    }
+
+    if (!autoCreate) {
+        console.error(
+            '[MoySklad] precustomerorder_saleschannel_missing_skip',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                createPayment: !!createPayment,
+                MOYSKLAD_SALESCHANNEL_AUTO_CREATE: autoCreate,
+                reason: 'saleschannel_not_found_auto_create_disabled'
+            })
+        );
+        return null;
     }
 
     const postPath = '/entity/saleschannel';
@@ -166,16 +220,45 @@ async function getOrCreateSalesChannelMeta(opts = null) {
         });
     }
 
-    const created = tracer
-        ? await tracer.run(
-              'precustomerorder_saleschannel_create',
-              'saleschannel',
-              'POST',
-              postPath,
-              () => ms.post(postPath, wire),
-              { bodyKeys: Object.keys(wire) }
-          )
-        : await ms.post(postPath, wire);
+    const createLogBase = {
+        orderId: orderId != null ? orderId : null,
+        createPayment: !!createPayment,
+        entity: 'saleschannel',
+        requestPath: postPath,
+        method: 'POST'
+    };
+    let created;
+    if (tracer) {
+        created = await tracer.run(
+            'precustomerorder_saleschannel_create',
+            'saleschannel',
+            'POST',
+            postPath,
+            () => msHttp.post(postPath, wire),
+            { bodyKeys: Object.keys(wire) }
+        );
+    } else {
+        console.error(
+            '[MoySklad] precustomerorder_saleschannel_create_started',
+            JSON.stringify(createLogBase)
+        );
+        try {
+            created = await msHttp.post(postPath, wire);
+            console.error(
+                '[MoySklad] precustomerorder_saleschannel_create_succeeded',
+                JSON.stringify({
+                    ...createLogBase,
+                    statusCode: created.status != null ? created.status : null
+                })
+            );
+        } catch (err) {
+            console.error(
+                '[MoySklad] precustomerorder_saleschannel_create_failed',
+                JSON.stringify({ ...createLogBase, ...summarizeAxiosMoySkladError(err) })
+            );
+            throw err;
+        }
+    }
     if (!created.data?.id) return null;
 
     cachedSalesChannelMeta = {
@@ -185,6 +268,10 @@ async function getOrCreateSalesChannelMeta(opts = null) {
     };
 
     return cachedSalesChannelMeta;
+}
+
+function resetMoySkladSalesChannelMetaCache() {
+    cachedSalesChannelMeta = null;
 }
 
 
@@ -1979,7 +2066,9 @@ module.exports = {
     isStaleCustomerOrderMappingError,
     recoverStaleCustomerOrderAfterPutNotFound,
     resetLocalMsMappingAfterStaleCustomerOrder,
-    scanStaleMsOrderLinks
+    scanStaleMsOrderLinks,
+    getOrCreateSalesChannelMeta,
+    resetMoySkladSalesChannelMetaCache
 };
 
 
