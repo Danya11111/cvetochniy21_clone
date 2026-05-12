@@ -14,7 +14,8 @@ const {
     buildPayloadMetaDebugEntries,
     serializeMoySkladJsonPayload,
     filterAttributesWithMissingValue,
-    redactCustomerOrderWirePayloadForLog
+    redactCustomerOrderWirePayloadForLog,
+    validateWireMetaLikeOrThrow
 } = require('../moysklad-payload-meta');
 
 async function test(name, fn) {
@@ -276,6 +277,21 @@ async function test(name, fn) {
             ]
         };
         assert.strictEqual(collectMetaTypeMissingPaths(payload).length, 0);
+    });
+
+    await test('validateWireMetaLikeOrThrow: href без type', () => {
+        assert.throws(() => {
+            validateWireMetaLikeOrThrow(
+                serializeMoySkladJsonPayload({
+                    x: { href: 'https://api.moysklad.ru/api/remap/1.2/entity/product/p1', mediaType: 'application/json' }
+                }),
+                'test'
+            );
+        }, /broken meta-like/);
+    });
+
+    await test('validateWireMetaLikeOrThrow: только name — ок', () => {
+        validateWireMetaLikeOrThrow(serializeMoySkladJsonPayload({ name: 'значение' }), 'test');
     });
 
     await test('fixMeta: заполняет type по href для attributemetadata', () => {

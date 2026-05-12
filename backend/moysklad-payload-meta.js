@@ -508,6 +508,116 @@ function summarizeCustomerOrderPayloadForLog(payload) {
     };
 }
 
+/** Рекурсивно убирает очевидные ПДн из произвольного JSON для логов pre-customerorder. */
+function redactGenericMoySkladLogObject(val, depth = 0) {
+    if (depth > 14) return '[MAX_DEPTH]';
+    if (val == null) return val;
+    const t = typeof val;
+    if (t === 'string') {
+        if (val.length > 80) return `[string len=${val.length}]`;
+        return val;
+    }
+    if (t !== 'object') return val;
+    if (Array.isArray(val)) return val.map(x => redactGenericMoySkladLogObject(x, depth + 1));
+
+    const REDACT_KEYS = new Set([
+        'phone',
+        'email',
+        'name',
+        'actualAddress',
+        'legalAddress',
+        'shipmentAddress',
+        'description',
+        'comment',
+        'text',
+        'cardText',
+        'recipientFullName',
+        'fullName',
+        'legalFirstName',
+        'legalLastName',
+        'legalMiddleName',
+        'legalTitle'
+    ]);
+
+    const out = {};
+    for (const k of Object.keys(val)) {
+        if (REDACT_KEYS.has(k)) out[k] = '[REDACTED]';
+        else out[k] = redactGenericMoySkladLogObject(val[k], depth + 1);
+    }
+    return out;
+}
+
+/**
+ * Лог wire-тела запроса к МС до customerorder (PII вычищены).
+ * @param {object} p
+ * @param {unknown} p.orderId
+ * @param {boolean} p.createPayment
+ * @param {string} p.step
+ * @param {string} p.entity
+ * @param {object} p.wireObj
+ * @param {{ error?: Function }} [p.logger]
+ * @param {number} [p.maxLen]
+ */
+function logPreCustomerorderEntityPayload({
+    orderId,
+    createPayment,
+    step,
+    entity,
+    wireObj,
+    logger = console,
+    maxLen = 6000
+}) {
+    const logErr = typeof logger.error === 'function' ? logger.error.bind(logger) : console.error.bind(console);
+    try {
+        const redacted = redactGenericMoySkladLogObject(wireObj);
+        let s = JSON.stringify(redacted);
+        if (s.length > maxLen) s = `${s.slice(0, maxLen)}…(truncated ${s.length})`;
+        logErr(
+            '[MoySklad] precustomerorder_payload_wire',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                createPayment: !!createPayment,
+                step,
+                entity,
+                json: s
+            })
+        );
+    } catch (e) {
+        logErr(
+            '[MoySklad] precustomerorder_payload_wire_failed',
+            JSON.stringify({
+                orderId: orderId != null ? orderId : null,
+                createPayment: !!createPayment,
+                step,
+                entity,
+                reason: e && e.message ? e.message : String(e)
+            })
+        );
+    }
+}
+
+/**
+ * Те же проверки meta-like, что у customerorder wire, для любого тела POST/PUT до апсерта заказа.
+ * @param {unknown} wireObj
+ * @param {string} errPrefix
+ */
+function validateWireMetaLikeOrThrow(wireObj, errPrefix) {
+    const wire = serializeMoySkladJsonPayload(wireObj);
+    const violations = [
+        ...new Set([...collectMetaTypeMissingPaths(wire), ...collectMetaLikeObjectsMissingType(wire)])
+    ];
+    if (violations.length) {
+        throw new Error(`${errPrefix}: broken meta-like objects (${violations.join('; ')})`);
+    }
+    const hrefMismatch = collectMetaLikeHrefTypeMismatches(wire);
+    if (hrefMismatch.length) {
+        const detail = hrefMismatch
+            .map(m => `${m.path} type=${m.type} inferredFromHref=${m.inferredFromHref}`)
+            .join('; ');
+        throw new Error(`${errPrefix}: href/type mismatch (${detail})`);
+    }
+}
+
 /**
  * @param {object} p
  * @param {unknown} p.orderId
@@ -547,5 +657,8 @@ module.exports = {
     filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
     summarizeCustomerOrderPayloadForLog,
-    logPayloadMetaTypeMissing
+    logPayloadMetaTypeMissing,
+    redactGenericMoySkladLogObject,
+    logPreCustomerorderEntityPayload,
+    validateWireMetaLikeOrThrow
 };

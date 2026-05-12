@@ -13,8 +13,14 @@ const {
     logPayloadWireRedactedJson,
     filterAttributesWithMissingValue,
     pruneInvalidMetaKeys,
-    logPayloadMetaTypeMissing
+    logPayloadMetaTypeMissing,
+    validateWireMetaLikeOrThrow,
+    logPreCustomerorderEntityPayload
 } = require('./moysklad-payload-meta');
+const {
+    createSendOrderHttpTracer,
+    buildCounterpartyCreatePayloadForMoySklad
+} = require('./moysklad-sendorder-trace');
 const {
     MOYSKLAD_TOKEN,
     MOYSKLAD_ORGANIZATION_NAME,
@@ -110,7 +116,7 @@ let cachedOrganizationMeta = null;
 
 let cachedSalesChannelMeta = null;
 
-async function getOrCreateSalesChannelMeta() {
+async function getOrCreateSalesChannelMeta(opts = null) {
     if (
         cachedSalesChannelMeta &&
         cachedSalesChannelMeta.href &&
@@ -119,12 +125,23 @@ async function getOrCreateSalesChannelMeta() {
         return cachedSalesChannelMeta;
     }
 
+    const tracer = opts && opts.tracer;
+    const orderId = opts && opts.orderId;
+    const createPayment = opts && opts.createPayment;
+
     const name = 'Telegram Bot';
 
-    // ищем
-    const res = await ms.get('/entity/saleschannel', {
-        params: { filter: `name=${name}` }
-    });
+    const searchPath = '/entity/saleschannel';
+    const res = tracer
+        ? await tracer.run(
+              'precustomerorder_saleschannel_search',
+              'saleschannel',
+              'GET',
+              searchPath,
+              () => ms.get(searchPath, { params: { filter: `name=${name}` } }),
+              { queryHint: 'filter_name_fixed' }
+          )
+        : await ms.get(searchPath, { params: { filter: `name=${name}` } });
 
     const row = res.data?.rows?.[0];
     if (row?.id) {
@@ -136,8 +153,29 @@ async function getOrCreateSalesChannelMeta() {
         return cachedSalesChannelMeta;
     }
 
-    // создаём
-    const created = await ms.post('/entity/saleschannel', { name });
+    const postPath = '/entity/saleschannel';
+    const wire = serializeMoySkladJsonPayload({ name });
+    validateWireMetaLikeOrThrow(wire, 'Refusing to create saleschannel');
+    if (orderId != null) {
+        logPreCustomerorderEntityPayload({
+            orderId,
+            createPayment: !!createPayment,
+            step: 'precustomerorder_saleschannel_create',
+            entity: 'saleschannel',
+            wireObj: wire
+        });
+    }
+
+    const created = tracer
+        ? await tracer.run(
+              'precustomerorder_saleschannel_create',
+              'saleschannel',
+              'POST',
+              postPath,
+              () => ms.post(postPath, wire),
+              { bodyKeys: Object.keys(wire) }
+          )
+        : await ms.post(postPath, wire);
     if (!created.data?.id) return null;
 
     cachedSalesChannelMeta = {
@@ -253,14 +291,22 @@ async function debugGetCustomerOrderFullByLocalOrderId(localOrderId) {
 
 
 
-async function getOrganizationMeta() {
+async function getOrganizationMeta(opts = null) {
     if (cachedOrganizationMeta) return cachedOrganizationMeta;
 
-    const res = await ms.get('/entity/organization', {
-        params: {
-            filter: `name=${MOYSKLAD_ORGANIZATION_NAME}`
-        }
-    });
+    const tracer = opts && opts.tracer;
+    const path = '/entity/organization';
+    const params = { params: { filter: `name=${MOYSKLAD_ORGANIZATION_NAME}` } };
+    const res = tracer
+        ? await tracer.run(
+              'precustomerorder_organization_list',
+              'organization',
+              'GET',
+              path,
+              () => ms.get(path, params),
+              { queryHint: 'filter_name_configured' }
+          )
+        : await ms.get(path, params);
 
     const rows = res.data.rows || [];
     if (!rows.length) {
@@ -283,41 +329,84 @@ async function getOrganizationMeta() {
 
 
 
-async function getOrCreateCounterpartyMeta(fullName, phone, email = '') {
+async function getOrCreateCounterpartyMeta(fullName, phone, email = '', opts = null) {
     if (!phone) {
         throw new Error('Phone is required to search/create counterparty');
     }
 
+    const tracer = opts && opts.tracer;
+    const orderId = opts && opts.orderId;
+    const createPayment = opts && opts.createPayment;
+
     const safeEmail = String(email || '').trim().toLowerCase();
 
-    // 1) пробуем найти по телефону
-    const res = await ms.get('/entity/counterparty', {
-        params: {
-            filter: `phone=${phone}`
-        }
-    });
+    const listPath = '/entity/counterparty';
+    const listParams = { params: { filter: `phone=${phone}` } };
+    const res = tracer
+        ? await tracer.run(
+              'precustomerorder_counterparty_search',
+              'counterparty',
+              'GET',
+              listPath,
+              () => ms.get(listPath, listParams),
+              { queryHint: 'filter_phone_redacted' }
+          )
+        : await ms.get(listPath, listParams);
 
     let cp = (res.data.rows || [])[0];
 
-    // 2) если не нашли — создаём нового
     if (!cp) {
-        const payload = {
-            name: fullName || phone,
-            phone: phone
-        };
-
-        // NEW: email в карточку контрагента
-        if (safeEmail) payload.email = safeEmail;
-
-        const createRes = await ms.post('/entity/counterparty', payload);
+        const payload = buildCounterpartyCreatePayloadForMoySklad(fullName, phone, email);
+        const wire = serializeMoySkladJsonPayload(payload);
+        validateWireMetaLikeOrThrow(wire, 'Refusing to create counterparty');
+        if (orderId != null) {
+            logPreCustomerorderEntityPayload({
+                orderId,
+                createPayment: !!createPayment,
+                step: 'precustomerorder_counterparty_create',
+                entity: 'counterparty',
+                wireObj: wire
+            });
+        }
+        const postPath = '/entity/counterparty';
+        const createRes = tracer
+            ? await tracer.run(
+                  'precustomerorder_counterparty_create',
+                  'counterparty',
+                  'POST',
+                  postPath,
+                  () => ms.post(postPath, wire),
+                  { bodyKeys: Object.keys(wire) }
+              )
+            : await ms.post(postPath, wire);
         cp = createRes.data;
     } else {
-        // NEW: если нашли существующего — и email задан, но в МС другой/пустой → обновляем
         const currentEmail = String(cp.email || '').trim().toLowerCase();
         if (safeEmail && safeEmail !== currentEmail) {
             try {
-                await ms.put(`/entity/counterparty/${cp.id}`, { email: safeEmail });
-                // чтобы дальше в коде всё было консистентно
+                const putPath = `/entity/counterparty/${cp.id}`;
+                const putWire = serializeMoySkladJsonPayload({ email: safeEmail });
+                validateWireMetaLikeOrThrow(putWire, 'Refusing to update counterparty email');
+                if (orderId != null) {
+                    logPreCustomerorderEntityPayload({
+                        orderId,
+                        createPayment: !!createPayment,
+                        step: 'precustomerorder_counterparty_email_put',
+                        entity: 'counterparty',
+                        wireObj: putWire
+                    });
+                }
+                if (tracer) {
+                    await tracer.run(
+                        'precustomerorder_counterparty_email_update',
+                        'counterparty',
+                        'PUT',
+                        putPath,
+                        () => ms.put(putPath, putWire)
+                    );
+                } else {
+                    await ms.put(putPath, putWire);
+                }
                 cp.email = safeEmail;
             } catch (e) {
                 console.warn('[MoySklad] Cannot update counterparty email:', e.response?.data || e.message);
@@ -866,6 +955,9 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         })
     );
 
+    const syncLogCtx = { orderId: order.id, createPayment: !!createPayment };
+    const tracer = createSendOrderHttpTracer(syncLogCtx);
+
     // NEW: товары доставки в МС (UUID или externalCode можно хранить в config.js)
     const {
         MOYSKLAD_DELIVERY_CITY400_ASSORTMENT,
@@ -896,7 +988,17 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
         const tryGetById = async (entity, type) => {
             try {
-                const r = await ms.get(`/entity/${entity}/${key}`);
+                const path = `/entity/${entity}/${encodeURIComponent(key)}`;
+                const r = tracer
+                    ? await tracer.run(
+                          `precustomerorder_delivery_assortment_${entity}_by_id`,
+                          entity,
+                          'GET',
+                          path,
+                          () => ms.get(path),
+                          { softFailStatuses: [404] }
+                      )
+                    : await ms.get(path);
                 const id = r.data?.id;
                 if (!id) return null;
                 return mk(entity, id, type);
@@ -907,9 +1009,19 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
         const tryFindByExternalCode = async (entity, type) => {
             try {
-                const r = await ms.get(`/entity/${entity}`, {
-                    params: { filter: `externalCode=${key}` }
-                });
+                const path = `/entity/${entity}`;
+                const r = tracer
+                    ? await tracer.run(
+                          `precustomerorder_delivery_assortment_${entity}_by_external_code`,
+                          entity,
+                          'GET',
+                          path,
+                          () => ms.get(path, { params: { filter: `externalCode=${key}` } }),
+                          { queryHint: 'filter_externalCode', softFailStatuses: [404] }
+                      )
+                    : await ms.get(path, {
+                          params: { filter: `externalCode=${key}` }
+                      });
                 const row = r.data?.rows?.[0];
                 if (!row?.id) return null;
                 return mk(entity, row.id, type);
@@ -998,7 +1110,17 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
         for (const [entity, type] of tryTypes) {
             try {
-                const r = await ms.get(`/entity/${entity}/${id}`);
+                const path = `/entity/${entity}/${encodeURIComponent(id)}`;
+                const r = tracer
+                    ? await tracer.run(
+                          `precustomerorder_line_assortment_${entity}_by_id`,
+                          entity,
+                          'GET',
+                          path,
+                          () => ms.get(path),
+                          { softFailStatuses: [404] }
+                      )
+                    : await ms.get(path);
                 const rid = r.data?.id;
                 if (!rid) continue;
                 const meta = {
@@ -1068,8 +1190,14 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
     }
 
     // --- 3) организация + контрагент ---
-    const organizationMeta = fixMeta(await getOrganizationMeta());
-    const agentMeta = fixMeta(await getOrCreateCounterpartyMeta(order.fullName, order.phone, order.email));
+    const organizationMeta = fixMeta(await getOrganizationMeta({ tracer }));
+    const agentMeta = fixMeta(
+        await getOrCreateCounterpartyMeta(order.fullName, order.phone, order.email, {
+            tracer,
+            orderId: order.id,
+            createPayment: !!createPayment
+        })
+    );
 
     // --- 4) адрес / самовывоз ---
     const shipmentAddress = String(order.address || '').trim() || '';
@@ -1105,7 +1233,16 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
     // --- 7) Атрибуты заказа (custom attributes) ---
     async function fetchCustomerOrderAttributesList() {
-        const metaRes = await ms.get('/entity/customerorder/metadata');
+        const metaPath = '/entity/customerorder/metadata';
+        const metaRes = tracer
+            ? await tracer.run(
+                  'precustomerorder_customerorder_metadata',
+                  'customerorder',
+                  'GET',
+                  metaPath,
+                  () => ms.get(metaPath)
+              )
+            : await ms.get(metaPath);
         const meta = metaRes.data || {};
         const raw = meta.attributes;
 
@@ -1116,7 +1253,16 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         if (!href) return [];
 
         const url = href.replace(/^https?:\/\/api\.moysklad\.ru\/api\/remap\/1\.2/, '');
-        const r = await ms.get(url);
+        const r = tracer
+            ? await tracer.run(
+                  'precustomerorder_customerorder_attributes_list',
+                  'customerorder',
+                  'GET',
+                  url,
+                  () => ms.get(url),
+                  { queryHint: 'metadata_attributes_href' }
+              )
+            : await ms.get(url);
         return r.data?.rows || [];
     }
 
@@ -1130,7 +1276,16 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         let url = href.replace(/^https?:\/\/api\.moysklad\.ru\/api\/remap\/1\.2/, '');
 
         try {
-            const metaResp = await ms.get(url);
+            const metaResp = tracer
+                ? await tracer.run(
+                      'precustomerorder_customentity_collection_resolve',
+                      'customentity',
+                      'GET',
+                      url,
+                      () => ms.get(url),
+                      { queryHint: 'customentity_meta_href' }
+                  )
+                : await ms.get(url);
             const d = metaResp.data || {};
 
             if (d.entityMeta?.href) {
@@ -1161,15 +1316,42 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         if (!collectionUrl) return null;
 
         try {
-            const listRes = await ms.get(collectionUrl);
+            const listRes = tracer
+                ? await tracer.run(
+                      'precustomerorder_customentity_values_list',
+                      'customentity',
+                      'GET',
+                      collectionUrl,
+                      () => ms.get(collectionUrl),
+                      { queryHint: 'collection_list' }
+                  )
+                : await ms.get(collectionUrl);
             const rows = listRes.data?.rows || [];
 
             const vn = String(valueName).trim().toLowerCase();
             let found = rows.find(r => String(r.name || '').trim().toLowerCase() === vn);
 
             if (!found) {
+                const wireCreate = serializeMoySkladJsonPayload({ name: valueName });
+                validateWireMetaLikeOrThrow(wireCreate, 'Refusing to create customentity element');
+                logPreCustomerorderEntityPayload({
+                    orderId: order.id,
+                    createPayment: !!createPayment,
+                    step: 'precustomerorder_customentity_value_create',
+                    entity: 'customentity',
+                    wireObj: wireCreate
+                });
                 try {
-                    const created = await ms.post(collectionUrl, { name: valueName });
+                    const created = tracer
+                        ? await tracer.run(
+                              'precustomerorder_customentity_value_create',
+                              'customentity',
+                              'POST',
+                              collectionUrl,
+                              () => ms.post(collectionUrl, wireCreate),
+                              { bodyKeys: Object.keys(wireCreate) }
+                          )
+                        : await ms.post(collectionUrl, wireCreate);
                     found = created.data;
                 } catch (_) {
                     return null;
@@ -1218,7 +1400,11 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         const fio = String(fullName || '').trim();
         if (!fio) return;
 
-        const cpMeta = await getOrCreateCounterpartyMeta(fio, String(phone || '').trim());
+        const cpMeta = await getOrCreateCounterpartyMeta(fio, String(phone || '').trim(), '', {
+            tracer,
+            orderId: order.id,
+            createPayment: !!createPayment
+        });
         attributesPayload.push({
             meta: metaOrNull(attrRow.meta, 'attributemetadata'),
             value: { meta: metaOrNull(cpMeta, 'counterparty') }
@@ -1312,7 +1498,11 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
     }
 
     // salesChannel — как у тебя сейчас
-    const salesChannelMeta = await getOrCreateSalesChannelMeta();
+    const salesChannelMeta = await getOrCreateSalesChannelMeta({
+        tracer,
+        orderId: order.id,
+        createPayment: !!createPayment
+    });
     if (
         salesChannelMeta &&
         typeof salesChannelMeta === 'object' &&
