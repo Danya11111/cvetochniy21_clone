@@ -2454,6 +2454,31 @@ function isNightClosedHours(now) {
 
 let checkoutRequestInFlight = false;
 
+function debugCheckout(tag, meta) {
+    try {
+        if (typeof console !== 'undefined' && console.debug) {
+            console.debug('[checkout]', tag, meta);
+        }
+    } catch (_) {}
+}
+
+function userFacingCheckoutFailureMessage(data, httpOk) {
+    const code = data && data.error != null ? String(data.error) : '';
+    let msg =
+        'Не получилось перейти к оплате. Попробуйте чуть позже или напишите в поддержку.';
+    if (code === 'checkout_failed_missing_ms_ids') {
+        msg =
+            'В корзине есть товар без привязки к каталогу. Обновите страницу или выберите товар заново.';
+    } else if (code === 'BAD_REQUEST') {
+        msg = 'Проверьте, что корзина не пустая и контактные данные заполнены.';
+    } else if (!httpOk && (!code || code === 'CHECKOUT_FAILED')) {
+        msg =
+            'Сервис временно недоступен. Попробуйте чуть позже или напишите в поддержку.';
+    }
+    debugCheckout('checkout_failure_mapped', { httpOk, code });
+    return msg;
+}
+
 async function confirmCheckout() {
     const ok = validateCheckoutForm({ showErrors: true });
     if (!ok) return;
@@ -2560,56 +2585,72 @@ async function confirmCheckout() {
             body: JSON.stringify(payload)
         });
 
-        const data = await resp.json();
-        if (!data.ok) {
-            const code = data.error || 'CHECKOUT_FAILED';
-            let msg = 'Не получилось оформить заказ. Попробуйте чуть позже или напишите в поддержку.';
-            if (code === 'checkout_failed_moysklad_sync') {
-                msg = 'Не удалось связать заказ с учётной системой. Попробуйте позже или напишите в поддержку.';
-            } else if (code === 'checkout_failed_missing_ms_ids') {
-                msg = 'В корзине есть товар без привязки к каталогу. Обновите страницу или выберите товар заново.';
-            } else if (code === 'BAD_REQUEST') {
-                msg = 'Проверьте, что корзина не пустая и контактные данные заполнены.';
+        let data = {};
+        try {
+            data = await resp.json();
+        } catch (_) {
+            data = {};
+        }
+
+        const paymentUrl = data.paymentUrl || data.payment_url;
+        const httpOk = !!resp.ok;
+
+        if (paymentUrl) {
+            if (data.warning_code === 'moysklad_degraded') {
+                debugCheckout('moysklad_degraded_ok', {
+                    warning_code: data.warning_code,
+                    warning_message: data.warning_message,
+                    orderId: data.orderId || data.order_id
+                });
             }
-            alert(msg);
+
+            const orderId = data.orderId || data.order_id;
+
+            if (window.Telegram && window.Telegram.WebApp) {
+                Telegram.WebApp.openLink(paymentUrl);
+            } else {
+                window.location.href = paymentUrl;
+            }
+
+            waitForOrderCompletion(orderId).then(success => {
+                if (!success) return;
+
+                const recoveredKey = getOrCreateCartKey();
+                if (recoveredKey) {
+                    void postAbandonedCartJson('/api/abandoned-cart/recovered', {
+                        cart_key: recoveredKey,
+                        order_id: orderId
+                    });
+                }
+                rotateCartKey();
+
+                cart = [];
+                try { localStorage.removeItem(CART_STORAGE_KEY); } catch (_) {}
+
+                if (typeof renderCart === 'function') renderCart();
+                if (typeof updateCartBadge === 'function') updateCartBadge();
+
+                closeCheckoutModal();
+                syncOrdersAndRenderProfile();
+            });
+
             return;
         }
 
-        const { paymentUrl, orderId } = data;
-        if (data.warning_code === 'moysklad_degraded') {
-            alert('Заказ принят и передан на оплату. Синхронизация с учётной системой временно не прошла — менеджер увидит заказ здесь.');
+        if (data && data.ok === true) {
+            alert(
+                'Не удалось получить ссылку на оплату. Попробуйте ещё раз или напишите в поддержку.'
+            );
+            return;
         }
 
-        if (window.Telegram && window.Telegram.WebApp) {
-            Telegram.WebApp.openLink(paymentUrl);
-        } else {
-            window.location.href = paymentUrl;
-        }
-
-        waitForOrderCompletion(orderId).then(success => {
-            if (!success) return;
-
-            const recoveredKey = getOrCreateCartKey();
-            if (recoveredKey) {
-                void postAbandonedCartJson('/api/abandoned-cart/recovered', {
-                    cart_key: recoveredKey,
-                    order_id: orderId
-                });
-            }
-            rotateCartKey();
-
-            cart = [];
-            try { localStorage.removeItem(CART_STORAGE_KEY); } catch (_) {}
-
-            if (typeof renderCart === 'function') renderCart();
-            if (typeof updateCartBadge === 'function') updateCartBadge();
-
-            closeCheckoutModal();
-            syncOrdersAndRenderProfile();
-        });
+        alert(userFacingCheckoutFailureMessage(data, httpOk));
 
     } catch (e) {
         console.error('confirmCheckout error:', e);
+        alert(
+            'Не удалось связаться с сервером. Проверьте подключение и попробуйте ещё раз.'
+        );
     } finally {
         checkoutRequestInFlight = false;
         if (btn) btn.disabled = false;

@@ -1,5 +1,10 @@
 'use strict';
 
+/** Пользовательское предупреждение при деградации МойСклад на checkout (не блокирует оплату). */
+const MOYSKLAD_CHECKOUT_WARNING_CODE = 'moysklad_degraded';
+const MOYSKLAD_CHECKOUT_WARNING_MESSAGE =
+    'Заказ создан. Если потребуется, администратор проверит складскую синхронизацию вручную.';
+
 /**
  * Число товарных строк корзины без msId/ms_id (по одной на SKU-строку, без размножения по quantity).
  * @param {Array<{ msId?: string, ms_id?: string }>} items
@@ -175,5 +180,7 @@ module.exports = {
     countCartLinesMissingMsId,
     syncOrderToMoySkladOnCheckout,
     buildMoySkladOrderPayloadFromDbRow,
-    deliveryMethodFromOrderRow
+    deliveryMethodFromOrderRow,
+    MOYSKLAD_CHECKOUT_WARNING_CODE,
+    MOYSKLAD_CHECKOUT_WARNING_MESSAGE
 };

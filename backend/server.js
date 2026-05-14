@@ -4,7 +4,11 @@ const express = require('express');
 const cors = require('cors');
 const db = require('./db');
 const { initPaymentForOrder, handleNotification } = require('./tbank');
-const { syncOrderToMoySkladOnCheckout } = require('./checkout-moysklad-order');
+const {
+    syncOrderToMoySkladOnCheckout,
+    MOYSKLAD_CHECKOUT_WARNING_CODE,
+    MOYSKLAD_CHECKOUT_WARNING_MESSAGE
+} = require('./checkout-moysklad-order');
 const { resolveCheckoutUnpaidOrderForReuse } = require('./checkout-order-reuse');
 const {
     syncProductsFromMoySklad,
@@ -1557,6 +1561,7 @@ app.post('/api/checkout', async (req, res) => {
         }
 
         let checkoutWarningCode = null;
+        let checkoutWarningMessage = null;
 
         const norm = s => String(s || '').trim().replace(/\s+/g, ' ');
         const normPhone = norm(phone);
@@ -1911,7 +1916,8 @@ app.post('/api/checkout', async (req, res) => {
         const needMsSync = (msSyncHash !== checkoutHash);
 
         if (needMsSync && !String(config.MOYSKLAD_TOKEN || '').trim()) {
-            checkoutWarningCode = 'moysklad_degraded';
+            checkoutWarningCode = MOYSKLAD_CHECKOUT_WARNING_CODE;
+            checkoutWarningMessage = MOYSKLAD_CHECKOUT_WARNING_MESSAGE;
             const reason = 'MOYSKLAD_TOKEN_NOT_CONFIGURED';
             console.error(
                 '[Checkout] moysklad_token_missing',
@@ -1971,7 +1977,8 @@ app.post('/api/checkout', async (req, res) => {
                         reason: failReason
                     })
                 );
-                checkoutWarningCode = 'moysklad_degraded';
+                checkoutWarningCode = MOYSKLAD_CHECKOUT_WARNING_CODE;
+                checkoutWarningMessage = MOYSKLAD_CHECKOUT_WARNING_MESSAGE;
                 await new Promise((resolve, reject) => {
                     db.run(
                         `UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = ? WHERE id = ?`,
@@ -2022,7 +2029,10 @@ app.post('/api/checkout', async (req, res) => {
                             paymentId: lastPayment.payment_id,
                             paymentUrl
                         };
-                        if (checkoutWarningCode) okBody.warning_code = checkoutWarningCode;
+                        if (checkoutWarningCode) {
+                            okBody.warning_code = checkoutWarningCode;
+                            if (checkoutWarningMessage) okBody.warning_message = checkoutWarningMessage;
+                        }
                         return res.json(okBody);
                     }
                 } catch (_) {}
@@ -2087,7 +2097,10 @@ app.post('/api/checkout', async (req, res) => {
             paymentUrl,
             paymentId
         };
-        if (checkoutWarningCode) okBodyFinal.warning_code = checkoutWarningCode;
+        if (checkoutWarningCode) {
+            okBodyFinal.warning_code = checkoutWarningCode;
+            if (checkoutWarningMessage) okBodyFinal.warning_message = checkoutWarningMessage;
+        }
         return res.json(okBodyFinal);
 
     } catch (e) {
