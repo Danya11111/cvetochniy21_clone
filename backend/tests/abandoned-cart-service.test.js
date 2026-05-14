@@ -267,6 +267,7 @@ function makeService(db, overrides = {}) {
         const rowsList = await svcNoTg.adminList({ limit: 5 });
         assert.ok(rowsList.length >= 1);
         assert.ok(String(rowsList[0].status_label || '').length > 0);
+        assert.strictEqual(rowsList[0].can_mark_expired === true || rowsList[0].can_mark_expired === false, true);
 
         /** recovered → notify запрещён */
         const dbRec = new sqlite3.Database(':memory:');

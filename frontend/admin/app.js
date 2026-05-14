@@ -225,6 +225,13 @@ function loadUiState() {
             }
         });
     } catch (_) {}
+    /** Раскрытие карточки: только boolean; иначе (битый LS) — свернуто */
+    {
+        const dab = state.dashboardAbandonedExpanded;
+        if (dab === true) state.dashboardAbandonedExpanded = true;
+        else if (dab === 'true' || dab === 1 || dab === '1') state.dashboardAbandonedExpanded = true;
+        else state.dashboardAbandonedExpanded = false;
+    }
     migrateDashboardDatesInState(saved);
     if (!MINI_APP_SCREEN_IDS.includes(String(state.currentScreen || '').trim().toLowerCase())) {
         state.currentScreen = BOTTOM_NAV_IDS.DASHBOARD;
@@ -1412,6 +1419,10 @@ async function renderDashboardV2Screen() {
         const sumCo = formatRubWholeFromKopecks(Number(sko.checkout_started || 0));
         const sumAb = formatRubWholeFromKopecks(Number(sko.abandoned || 0));
         const sumNo = formatRubWholeFromKopecks(Number(sko.notified || 0));
+        const sumActN = Number(sko.active || 0);
+        const sumCoN = Number(sko.checkout_started || 0);
+        const sumAbN = Number(sko.abandoned || 0);
+        const sumNoN = Number(sko.notified || 0);
         const errs = Array.isArray(ac.problemLastErrors) ? ac.problemLastErrors : [];
         const errBlock =
             acExpanded && errs.length
@@ -1420,8 +1431,40 @@ async function renderDashboardV2Screen() {
                       .join('')}</ul>`
                 : '';
         const chev = acExpanded ? '▾' : '▸';
+
+        /** @type {string[]} */
+        const gridCells = [];
+        gridCells.push(
+            `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Активные</span><span class="dashboard-v2__abandoned-cell__v">${esc(formatNum(nActiveOnly))} · ${esc(sumAct)}</span></div>`
+        );
+        if (nCheckout > 0 || sumCoN > 0) {
+            gridCells.push(
+                `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Оформление</span><span class="dashboard-v2__abandoned-cell__v">${esc(formatNum(nCheckout))} · ${esc(sumCo)}</span></div>`
+            );
+        }
+        if (nAbandoned > 0 || sumAbN > 0) {
+            gridCells.push(
+                `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Брошенные</span><span class="dashboard-v2__abandoned-cell__v">${esc(formatNum(nAbandoned))} · ${esc(sumAb)}</span></div>`
+            );
+        }
+        if (nNotified > 0 || sumNoN > 0) {
+            gridCells.push(
+                `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Уведомлённые</span><span class="dashboard-v2__abandoned-cell__v">${esc(formatNum(nNotified))} · ${esc(sumNo)}</span></div>`
+            );
+        }
+        if (nRecovered > 0) {
+            gridCells.push(
+                `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Восстановлены</span><span class="dashboard-v2__abandoned-cell__v">${esc(formatNum(nRecovered))}</span></div>`
+            );
+        }
+        gridCells.push(
+            `<div class="dashboard-v2__abandoned-cell"><span class="dashboard-v2__abandoned-cell__k">Конверсия</span><span class="dashboard-v2__abandoned-cell__v">${esc(conv)}%</span></div>`
+        );
+
+        const gridHtml = `<div class="dashboard-v2__abandoned-grid">${gridCells.join('')}</div>`;
+
         return `
-            <div class="dashboard-v2__abandoned-wrap">
+            <div class="dashboard-v2__abandoned-wrap dashboard-v2__abandoned-wrap--compact">
                 <div class="dashboard-v2__abandoned-head">
                     <button
                         type="button"
@@ -1438,18 +1481,10 @@ async function renderDashboardV2Screen() {
                     </button>
                     <button type="button" class="dashboard-v2__abandoned-help-btn" data-action="dash-tip" data-tip-id="abandoned_carts" aria-label="Справка: брошенные корзины">?</button>
                 </div>
-                <p class="dashboard-v2__abandoned-subtitle">${esc(subtitle)}</p>
+                ${!acExpanded ? `<p class="dashboard-v2__abandoned-subtitle dashboard-v2__abandoned-subtitle--only-collapsed">${esc(subtitle)}</p>` : ''}
                 <div class="dashboard-v2__abandoned-details${acExpanded ? '' : ' dashboard-v2__abandoned-details--collapsed'}">
                     ${isEmptySnapshot && acExpanded ? `<div class="dashboard-v2__empty-soft dashboard-v2__empty-soft--tight">Пока нет брошенных корзин</div>` : ''}
-                    <div class="dashboard-v2__abandoned-kv">
-                        <div>Активные: <strong>${esc(formatNum(nActiveOnly))}</strong> · ${esc(sumAct)}</div>
-                        <div>Оформление: <strong>${esc(formatNum(nCheckout))}</strong> · ${esc(sumCo)}</div>
-                        <div>Брошенные: <strong>${esc(formatNum(nAbandoned))}</strong> · ${esc(sumAb)}</div>
-                        <div>Уведомлённые: <strong>${esc(formatNum(nNotified))}</strong> · ${esc(sumNo)}</div>
-                        <div>Восстановленные: <strong>${esc(formatNum(nRecovered))}</strong></div>
-                        <div>Конверсия: <strong>${esc(conv)}%</strong></div>
-                        <div>Корзин (проблемные статусы): <strong>${esc(formatNum(nProblemCarts))}</strong></div>
-                    </div>
+                    ${gridHtml}
                     ${errBlock}
                     <button type="button" class="dashboard-v2__dash-row dashboard-v2__abandoned-open" data-action="open-abandoned-carts" aria-label="Открыть список брошенных корзин">
                         <span>${esc('Открыть список')}</span><strong aria-hidden="true">→</strong>
@@ -1592,6 +1627,105 @@ function abandonedNotifyDisabledUiLabel(reason) {
     return 'Уведомление недоступно';
 }
 
+/**
+ * Одна карточка корзины; ошибка в данных одной записи не валит весь экран.
+ * @param {Record<string, any>} r
+ */
+function renderOneAbandonedCartCard(r) {
+    try {
+        const row = r && typeof r === 'object' ? r : {};
+        const id = Number(row.id);
+        if (!Number.isFinite(id) || id <= 0) {
+            return `<article class="abandoned-cart-card abandoned-cart-card--warn" role="article"><p class="abandoned-cart-card__warn">Некорректная запись корзины</p></article>`;
+        }
+        const canMarkExpired = row.can_mark_expired === true;
+        const titleDate =
+            row.created_at && String(row.created_at).trim()
+                ? formatDateTime(row.created_at)
+                : `№${id}`;
+        const title = `Корзина · ${titleDate}`;
+        const stRaw = String(row.status_label != null ? row.status_label : row.status || '—');
+        const totalK =
+            row.total_amount_kopecks != null ? row.total_amount_kopecks : row.total_amount || 0;
+        const money = formatKopecksAsRub(totalK);
+        const cnt = Number(row.items_count != null ? row.items_count : 0);
+        const previewItems = Array.isArray(row.items_preview) ? row.items_preview : [];
+        const lines = previewItems.length
+            ? previewItems
+                  .slice(0, 8)
+                  .map((it) => {
+                      const nm = esc(String((it && it.name) || 'Товар').slice(0, 120));
+                      const q = formatNum(it && it.quantity != null ? it.quantity : 0);
+                      const sum =
+                          it && it.line_total_kopecks != null
+                              ? formatKopecksAsRub(it.line_total_kopecks)
+                              : '';
+                      return `<li class="abandoned-item-line"><span class="abandoned-item-line__name">${nm}</span><span class="abandoned-item-line__qty">× ${q}</span>${sum ? `<span class="abandoned-item-line__sum">${esc(sum)}</span>` : ''}</li>`;
+                  })
+                  .join('')
+            : '';
+
+        const customerMain = esc(
+            String(row.customer_display != null && String(row.customer_display).trim()
+                ? row.customer_display
+                : 'Клиент пока не определён')
+        );
+        const tgLine =
+            row.tg_user_id && String(row.tg_user_id).trim()
+                ? `<p class="abandoned-cart__tg mono">Telegram ID: ${esc(String(row.tg_user_id))}</p>`
+                : '';
+
+        const err =
+            row.last_error && String(row.last_error).trim()
+                ? `<p class="abandoned-cart__error">${esc(String(row.last_error).slice(0, 360))}</p>`
+                : '';
+
+        const canNotify = row.can_notify_client === true;
+        const notifyReason =
+            row.notify_disabled_reason && String(row.notify_disabled_reason).trim()
+                ? String(row.notify_disabled_reason).trim()
+                : '';
+
+        const expireBtn = canMarkExpired
+            ? `<button type="button" class="admin-btn admin-btn--ghost" data-action="abandoned-cart-expire" data-id="${esc(String(id))}">Пометить истёкшей</button>`
+            : '';
+
+        let notifyBtn = '';
+        if (canNotify) {
+            notifyBtn = `<button type="button" class="admin-btn admin-btn--secondary" data-action="abandoned-cart-notify" data-id="${esc(String(id))}">Уведомить клиента</button>`;
+        } else if (notifyReason) {
+            const dl = abandonedNotifyDisabledUiLabel(notifyReason);
+            notifyBtn = `<button type="button" class="admin-btn admin-btn--ghost" disabled title="${esc(notifyReason)}">${esc(dl)}</button>`;
+        }
+
+        const keyShort = String(row.cart_key_short != null ? row.cart_key_short : '').trim();
+        const tech = `<details class="abandoned-cart-tech"><summary>Технические детали</summary><p class="mono abandoned-cart-tech__key">${esc(keyShort || '—')}</p></details>`;
+
+        return `
+            <article class="abandoned-cart-card">
+                <div class="abandoned-cart-card__head">
+                    <div>
+                        <h3 class="abandoned-cart-card__title">${esc(title)}</h3>
+                        <p class="abandoned-cart-card__sub">${esc(formatDateTime(row.last_seen_at))} · ${esc(formatNum(cnt))} шт.</p>
+                    </div>
+                    ${statusBadge(stRaw, 'info')}
+                </div>
+                <div class="abandoned-cart-card__money">${esc(money)}</div>
+                <p class="abandoned-cart__customer">${customerMain}</p>
+                ${tgLine}
+                ${lines ? `<ul class="abandoned-items">${lines}</ul>` : ''}
+                ${err}
+                ${tech}
+                <div class="abandoned-cart-actions">
+                    ${expireBtn}
+                    ${notifyBtn}
+                </div>
+            </article>`;
+    } catch (e) {
+        return `<article class="abandoned-cart-card abandoned-cart-card--warn" role="article"><p class="abandoned-cart-card__warn">Не удалось отобразить корзину</p></article>`;
+    }
+}
+
 async function renderAbandonedCartsScreen() {
     const mod = adminConfig && adminConfig.modules && adminConfig.modules.abandoned_carts;
     if (!mod) {
@@ -1643,83 +1777,7 @@ async function renderAbandonedCartsScreen() {
         </form>`;
 
     const list = rows.length
-        ? rows
-              .map((r) => {
-                  const id = Number(r.id);
-                  const titleDate = r.created_at ? formatDateTime(r.created_at) : `№${id}`;
-                  const title = `Корзина · ${titleDate}`;
-                  const stRaw = String(r.status_label || r.status || '—');
-                  const money = formatKopecksAsRub(r.total_amount_kopecks != null ? r.total_amount_kopecks : r.total_amount || 0);
-                  const cnt = Number(r.items_count != null ? r.items_count : 0);
-                  const previewItems = Array.isArray(r.items_preview) ? r.items_preview : [];
-                  const lines = previewItems.length
-                      ? previewItems
-                            .slice(0, 8)
-                            .map((it) => {
-                                const nm = esc(String(it.name || 'Товар').slice(0, 120));
-                                const q = formatNum(it.quantity || 0);
-                                const sum =
-                                    it.line_total_kopecks != null
-                                        ? formatKopecksAsRub(it.line_total_kopecks)
-                                        : '';
-                                return `<li class="abandoned-item-line"><span class="abandoned-item-line__name">${nm}</span><span class="abandoned-item-line__qty">× ${q}</span>${sum ? `<span class="abandoned-item-line__sum">${esc(sum)}</span>` : ''}</li>`;
-                            })
-                            .join('')
-                      : '';
-
-                  const customerMain = esc(String(r.customer_display || 'Клиент пока не определён'));
-                  const tgLine =
-                      r.tg_user_id && String(r.tg_user_id).trim()
-                          ? `<p class="abandoned-cart__tg mono">Telegram ID: ${esc(String(r.tg_user_id))}</p>`
-                          : '';
-
-                  const err =
-                      r.last_error && String(r.last_error).trim()
-                          ? `<p class="abandoned-cart__error">${esc(String(r.last_error).slice(0, 360))}</p>`
-                          : '';
-
-                  const canNotify = r.can_notify_client === true;
-                  const notifyReason =
-                      r.notify_disabled_reason && String(r.notify_disabled_reason).trim()
-                          ? String(r.notify_disabled_reason).trim()
-                          : '';
-
-                  const expireBtn = canExp
-                      ? `<button type="button" class="admin-btn admin-btn--ghost" data-action="abandoned-cart-expire" data-id="${esc(String(id))}">Пометить истёкшей</button>`
-                      : '';
-
-                  let notifyBtn = '';
-                  if (canNotify) {
-                      notifyBtn = `<button type="button" class="admin-btn admin-btn--secondary" data-action="abandoned-cart-notify" data-id="${esc(String(id))}">Уведомить клиента</button>`;
-                  } else if (notifyReason) {
-                      const dl = abandonedNotifyDisabledUiLabel(notifyReason);
-                      notifyBtn = `<button type="button" class="admin-btn admin-btn--ghost" disabled title="${esc(notifyReason)}">${esc(dl)}</button>`;
-                  }
-
-                  const tech = `<details class="abandoned-cart-tech"><summary>Технические детали</summary><p class="mono abandoned-cart-tech__key">${esc(String(r.cart_key_short || ''))}</p></details>`;
-
-                  return `
-            <article class="abandoned-cart-card">
-                <div class="abandoned-cart-card__head">
-                    <div>
-                        <h3 class="abandoned-cart-card__title">${esc(title)}</h3>
-                        <p class="abandoned-cart-card__sub">${esc(formatDateTime(r.last_seen_at))} · ${esc(formatNum(cnt))} шт.</p>
-                    </div>
-                    ${statusBadge(stRaw, 'info')}
-                </div>
-                <div class="abandoned-cart-card__money">${esc(money)}</div>
-                <p class="abandoned-cart__customer">${customerMain}</p>
-                ${tgLine}
-                ${lines ? `<ul class="abandoned-items">${lines}</ul>` : ''}
-                ${err}
-                ${tech}
-                <div class="abandoned-cart-actions">
-                    ${expireBtn}
-                    ${notifyBtn}
-                </div>
-            </article>`;
-              })
-              .join('')
+        ? rows.map((r) => renderOneAbandonedCartCard(r)).join('')
         : `<div class="dashboard-v2__empty-soft">Пока нет брошенных корзин</div>`;
 
     return `
