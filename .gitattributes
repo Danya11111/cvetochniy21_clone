@@ -1,0 +1,3 @@
+# Bash-скрипты для GHA (stdin на удалённый bash) должны оставаться с LF.
+scripts/gha-remote-post-rsync.sh text eol=lf
+scripts/gha-remote-healthcheck-soft.sh text eol=lf

@@ -1,0 +1,26 @@
+# Пример unit для деплоя через GitHub Actions (автодетект имени cvetochniy21.service).
+# Не устанавливать автоматически из CI. Скопируйте на сервер и отредактируйте пути User/Group/WorkingDirectory.
+#
+#   sudo cp deploy/cvetochniy21.service.example /etc/systemd/system/cvetochniy21.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cvetochniy21.service
+#
+# Переменные среды: только EnvironmentFile или drop-ins; NODE_ENV задаётся отдельной директивой Environment=.
+
+[Unit]
+Description=Cvetochniy21 backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/cvetochniy21
+Environment=NODE_ENV=production
+EnvironmentFile=/var/www/cvetochniy21/.env
+User=deploy
+Group=deploy
+ExecStart=/usr/bin/node backend/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

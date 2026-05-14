@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Вызывается с удалённой машины: ssh ... "export DEPLOY_PATH=...; bash -s" < scripts/gha-remote-post-rsync.sh
+set -euo pipefail
+cd "${DEPLOY_PATH:?DEPLOY_PATH is required}"
+if [ -f package-lock.json ]; then
+  npm ci --omit=dev
+else
+  npm install --omit=dev
+fi
+if systemctl cat cvetochniy21.service &>/dev/null; then
+  sudo systemctl restart cvetochniy21.service
+elif systemctl cat f21.service &>/dev/null; then
+  sudo systemctl restart f21.service
+elif command -v pm2 >/dev/null 2>&1 && pm2 describe cvetochniy21 >/dev/null 2>&1; then
+  pm2 restart cvetochniy21
+elif command -v pm2 >/dev/null 2>&1 && pm2 describe f21 >/dev/null 2>&1; then
+  pm2 restart f21
+else
+  echo "No known process manager found. Configure systemd service cvetochniy21.service or pm2 process cvetochniy21."
+  exit 1
+fi
