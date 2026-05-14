@@ -13,12 +13,18 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.3.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -37,11 +43,38 @@ jobs:
         shell: bash
         run: npm test
 
+      - name: Validate deploy secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Missing required secret: DEPLOY_HOST}"
+          : "${DEPLOY_USER:?Missing required secret: DEPLOY_USER}"
+          : "${DEPLOY_PORT:?Missing required secret: DEPLOY_PORT}"
+          : "${DEPLOY_PATH:?Missing required secret: DEPLOY_PATH}"
+          : "${DEPLOY_SSH_KEY:?Missing required secret: DEPLOY_SSH_KEY}"
+          if ! [[ "${DEPLOY_PORT}" =~ ^[0-9]+$ ]] || [ "${DEPLOY_PORT}" -le 0 ]; then
+            echo "DEPLOY_PORT must be a positive integer (e.g. 22)" >&2
+            exit 1
+          fi
+          if [ "${DEPLOY_PATH:0:1}" != "/" ]; then
+            echo "DEPLOY_PATH must be an absolute path, for example /var/www/cvetochniy21" >&2
+            exit 1
+          fi
+          if [ "$DEPLOY_PATH" = "/" ]; then
+            echo "DEPLOY_PATH must not be the filesystem root /" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$DEPLOY_SSH_KEY" | grep -q 'BEGIN'; then
+            echo "DEPLOY_SSH_KEY is invalid: expected a private key header (BEGIN ...). Value is not printed." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$DEPLOY_SSH_KEY" | grep -q 'PRIVATE KEY'; then
+            echo "DEPLOY_SSH_KEY is invalid: expected PRIVATE KEY in PEM/OpenSSH key. Value is not printed." >&2
+            exit 1
+          fi
+          echo "Deploy secrets present and DEPLOY_PATH shape validated (values not shown)."
+
       - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         shell: bash
         run: |
           set -euo pipefail
@@ -52,31 +85,27 @@ jobs:
           ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
       - name: Prepare remote directory
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         shell: bash
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
-            "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            bash -lc "mkdir -p -- $(printf '%q' "$DEPLOY_PATH") && test -w -- $(printf '%q' "$DEPLOY_PATH")"
+          DEPLOY_PATH_Q="$(printf '%q' "$DEPLOY_PATH")"
+          printf '%s\n' \
+            'set -euo pipefail' \
+            ': "${DEPLOY_PATH:?DEPLOY_PATH is required on remote}"' \
+            'mkdir -p "$DEPLOY_PATH"' \
+            'test -w "$DEPLOY_PATH"' | \
+            ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              "DEPLOY_PATH=${DEPLOY_PATH_Q} bash -se"
 
       - name: Rsync to server
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         shell: bash
         run: |
           set -euo pipefail
-          SSH_RSYNC='ssh -i ~/.ssh/deploy_key -p '"$DEPLOY_PORT"' -o StrictHostKeyChecking=yes'
+          RSYNC_RSH="ssh -i ~/.ssh/deploy_key -p ${DEPLOY_PORT} -o StrictHostKeyChecking=yes"
           DEST="${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
           rsync -avz \
-            -e "$SSH_RSYNC" \
+            -e "$RSYNC_RSH" \
             --include '.env.example' \
             --exclude '.git/' \
             --exclude '.github/' \
@@ -97,30 +126,22 @@ jobs:
             --exclude 'backend/data/promotion-uploads/' \
             --exclude 'logs/' \
             --exclude '*.log' \
-            ./ "$DEST"
+            "./" "${DEST}"
 
       - name: Install production dependencies and restart
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         shell: bash
         run: |
           set -euo pipefail
+          DEPLOY_PATH_Q="$(printf '%q' "$DEPLOY_PATH")"
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "export DEPLOY_PATH=$(printf '%q' "$DEPLOY_PATH"); bash -s" < scripts/gha-remote-post-rsync.sh
+            "DEPLOY_PATH=${DEPLOY_PATH_Q} bash -se" < scripts/gha-remote-post-rsync.sh
 
       - name: Optional health probe (non-blocking)
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         shell: bash
         run: |
           set -euo pipefail
+          DEPLOY_PATH_Q="$(printf '%q' "$DEPLOY_PATH")"
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "export DEPLOY_PATH=$(printf '%q' "$DEPLOY_PATH"); bash -s" < scripts/gha-remote-healthcheck-soft.sh
+            "DEPLOY_PATH=${DEPLOY_PATH_Q} bash -se" < scripts/gha-remote-healthcheck-soft.sh

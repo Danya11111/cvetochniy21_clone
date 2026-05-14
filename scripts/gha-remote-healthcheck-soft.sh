@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Неблокирующий curl к публичному URL из .env (см. docs/github-actions-ssh-deploy.md).
+# DEPLOY_PATH задаётся в вызове ssh (DEPLOY_PATH=<printf %q> bash -se).
+set -euo pipefail
+: "${DEPLOY_PATH:?DEPLOY_PATH is required}"
 set +e
-cd "${DEPLOY_PATH:?DEPLOY_PATH is required}" || { echo "Healthcheck skipped: cannot cd to DEPLOY_PATH"; exit 0; }
+cd "$DEPLOY_PATH" || { echo "Healthcheck skipped: cannot cd to DEPLOY_PATH"; exit 0; }
 if ! command -v curl >/dev/null 2>&1; then
   echo "Healthcheck skipped: curl not installed on server"
   exit 0

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Вызывается с удалённой машины: ssh ... "export DEPLOY_PATH=...; bash -s" < scripts/gha-remote-post-rsync.sh
+# CI: ssh ... "DEPLOY_PATH=<quoted> bash -se" < scripts/gha-remote-post-rsync.sh
 set -euo pipefail
-cd "${DEPLOY_PATH:?DEPLOY_PATH is required}"
+: "${DEPLOY_PATH:?DEPLOY_PATH is required}"
+cd "$DEPLOY_PATH"
 if [ -f package-lock.json ]; then
   npm ci --omit=dev
 else
