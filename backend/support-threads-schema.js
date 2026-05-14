@@ -71,9 +71,45 @@ async function ensureSupportThreadsDenormSchema(db, ensureColumn, logger = conso
     logInfo(logger, 'support_threads_denorm_backfill_started', { addedColumns });
 
     try {
-        await runSql(
-            db,
-            `
+        await runSupportThreadsDenormBackfillSql(db);
+        logInfo(logger, 'support_threads_denorm_backfill_done', { addedColumns });
+        return { addedColumns, backfilled: true };
+    } catch (e) {
+        logError(logger, 'support_threads_denorm_backfill_failed', {
+            message: e && e.message ? e.message : String(e)
+        });
+        throw e;
+    }
+}
+
+/**
+ * Идемпотентно пересчитывает denorm-колонки support_threads из support_messages.
+ * Нужен после импорта legacy-данных, когда колонки уже есть, но были пустыми.
+ * @param {*} db sqlite3.Database
+ * @param {{ log?: Function, error?: Function }} [logger]
+ */
+async function reconcileSupportThreadsDenormFromMessages(db, logger = console) {
+    if (!(await tableExists(db, 'support_threads')) || !(await tableExists(db, 'support_messages'))) {
+        logInfo(logger, 'support_threads_denorm_reconcile_skipped', { reason: 'missing_table' });
+        return { ok: false, skipped: true };
+    }
+    logInfo(logger, 'support_threads_denorm_reconcile_started', {});
+    try {
+        await runSupportThreadsDenormBackfillSql(db);
+        logInfo(logger, 'support_threads_denorm_reconcile_done', { ok: true });
+        return { ok: true, skipped: false };
+    } catch (e) {
+        logError(logger, 'support_threads_denorm_reconcile_failed', {
+            message: e && e.message ? e.message : String(e)
+        });
+        throw e;
+    }
+}
+
+async function runSupportThreadsDenormBackfillSql(db) {
+    await runSql(
+        db,
+        `
             UPDATE support_threads SET
                 last_client_message_at = (
                     SELECT MAX(sm.created_at) FROM support_messages sm
@@ -91,10 +127,10 @@ async function ensureSupportThreadsDenormSchema(db, ensureColumn, logger = conso
                     ORDER BY sm.id DESC LIMIT 1
                 )
         `
-        );
-        await runSql(
-            db,
-            `
+    );
+    await runSql(
+        db,
+        `
             UPDATE support_threads SET
                 waiting_for_staff = CASE
                     WHEN UPPER(TRIM(COALESCE(status,''))) NOT IN ('OPEN','PENDING') THEN 0
@@ -106,18 +142,12 @@ async function ensureSupportThreadsDenormSchema(db, ensureColumn, logger = conso
                     ELSE 0
                 END
         `
-        );
-        logInfo(logger, 'support_threads_denorm_backfill_done', { addedColumns });
-        return { addedColumns, backfilled: true };
-    } catch (e) {
-        logError(logger, 'support_threads_denorm_backfill_failed', {
-            message: e && e.message ? e.message : String(e)
-        });
-        throw e;
-    }
+    );
 }
 
 module.exports = {
     SUPPORT_THREAD_DENORM_COLUMNS,
-    ensureSupportThreadsDenormSchema
+    ensureSupportThreadsDenormSchema,
+    reconcileSupportThreadsDenormFromMessages,
+    runSupportThreadsDenormBackfillSql
 };

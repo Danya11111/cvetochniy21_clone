@@ -1,6 +1,6 @@
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const { ensureSupportThreadsDenormSchema } = require('./support-threads-schema');
+const { ensureSupportThreadsDenormSchema, reconcileSupportThreadsDenormFromMessages } = require('./support-threads-schema');
 
 const dbPathRaw = process.env.F21_SQLITE_PATH && String(process.env.F21_SQLITE_PATH).trim();
 const dbPath = dbPathRaw || path.join(__dirname, 'database.sqlite');
@@ -29,35 +29,67 @@ function ensureColumn(table, column, definition) {
 }
 
 /**
- * first_seen_at: первое появление в боте. Не перезаписываем, если уже есть.
- * Backfill: дата первого заказа (ORDER BY id ASC); иначе фиксированная метка миграции.
+ * first_seen_at: первое появление в боте. Идемпотентно заполняем только пустые значения.
+ * Приоритет: users.created_at → первый заказ → самое раннее сообщение поддержки → создание треда.
+ * Не подставляем «дату миграции» для всех без активности — это ломает аналитику «новые клиенты».
  */
 async function backfillUsersFirstSeenAt(database) {
-    const migrationIso = new Date().toISOString();
-    await new Promise((resolve, reject) => {
-        database.run(
-            `
+    const runs = [
+        `
+            UPDATE users SET first_seen_at = created_at
+            WHERE (first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = '')
+              AND created_at IS NOT NULL AND TRIM(COALESCE(created_at, '')) <> ''
+        `,
+        `
             UPDATE users SET first_seen_at = (
                 SELECT o.created_at FROM orders o
                 WHERE TRIM(CAST(o.telegram_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND o.created_at IS NOT NULL AND TRIM(COALESCE(o.created_at, '')) <> ''
                 ORDER BY o.id ASC LIMIT 1
             )
             WHERE (first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = '')
               AND EXISTS (
                 SELECT 1 FROM orders o2
                 WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND o2.created_at IS NOT NULL AND TRIM(COALESCE(o2.created_at, '')) <> ''
               )
-            `,
-            (err) => (err ? reject(err) : resolve())
-        );
-    });
-    await new Promise((resolve, reject) => {
-        database.run(
-            `UPDATE users SET first_seen_at = ? WHERE first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = ''`,
-            [migrationIso],
-            (err) => (err ? reject(err) : resolve())
-        );
-    });
+        `,
+        `
+            UPDATE users SET first_seen_at = (
+                SELECT sm.created_at FROM support_messages sm
+                INNER JOIN support_threads st ON st.id = sm.thread_id
+                WHERE TRIM(CAST(st.telegram_user_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND sm.created_at IS NOT NULL AND TRIM(COALESCE(sm.created_at, '')) <> ''
+                ORDER BY sm.id ASC LIMIT 1
+            )
+            WHERE (first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = '')
+              AND EXISTS (
+                SELECT 1 FROM support_messages sm2
+                INNER JOIN support_threads st2 ON st2.id = sm2.thread_id
+                WHERE TRIM(CAST(st2.telegram_user_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND sm2.created_at IS NOT NULL AND TRIM(COALESCE(sm2.created_at, '')) <> ''
+              )
+        `,
+        `
+            UPDATE users SET first_seen_at = (
+                SELECT st.created_at FROM support_threads st
+                WHERE TRIM(CAST(st.telegram_user_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND st.created_at IS NOT NULL AND TRIM(COALESCE(st.created_at, '')) <> ''
+                ORDER BY st.id ASC LIMIT 1
+            )
+            WHERE (first_seen_at IS NULL OR TRIM(COALESCE(first_seen_at, '')) = '')
+              AND EXISTS (
+                SELECT 1 FROM support_threads st2
+                WHERE TRIM(CAST(st2.telegram_user_id AS TEXT)) = TRIM(CAST(users.telegram_id AS TEXT))
+                  AND st2.created_at IS NOT NULL AND TRIM(COALESCE(st2.created_at, '')) <> ''
+              )
+        `
+    ];
+    for (const sql of runs) {
+        await new Promise((resolve, reject) => {
+            database.run(sql, (err) => (err ? reject(err) : resolve()));
+        });
+    }
 }
 
 db.serialize(() => {
@@ -551,6 +583,7 @@ async function runAllMigrationsAsync() {
         await ensureColumn('users', 'broadcast_suppressed_at', 'TEXT');
         await ensureColumn('users', 'first_source_code', 'TEXT');
         await ensureColumn('users', 'last_source_code', 'TEXT');
+        await ensureColumn('users', 'created_at', 'TEXT');
         await ensureColumn('users', 'first_seen_at', 'TEXT');
 
         await backfillUsersFirstSeenAt(db);
@@ -637,6 +670,7 @@ async function runAllMigrationsAsync() {
         await ensureColumn('products', 'category_path', 'TEXT');
 
         await ensureSupportThreadsDenormSchema(db, ensureColumn, console);
+        await reconcileSupportThreadsDenormFromMessages(db, console);
 
         await new Promise((resolve, reject) => {
             db.run(

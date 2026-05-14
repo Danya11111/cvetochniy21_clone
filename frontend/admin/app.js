@@ -37,7 +37,7 @@ const DASH_METRIC_HELP = {
     avg_check: { title: 'Ср. чек', body: 'Выручка за период, делённая на количество оплаченных заказов за этот период.' },
     new_clients: {
         title: 'Новые клиенты',
-        body: 'Пользователи, которые впервые появились в боте (запись в users) в выбранный период по дате первого визита. Заказ и оплата не обязательны.'
+        body: 'Пользователи с оценкой первого появления в выбранный период: берём first_seen_at из профиля, иначе безопасную реконструкцию по заказам/поддержке (без «даты миграции» для всех подряд).'
     },
     clients_total: {
         title: 'Все клиенты',
@@ -61,7 +61,7 @@ const DASH_METRIC_HELP = {
     },
     response_time: {
         title: 'Скорость ответа',
-        body: 'Среднее время до первого ответа менеджера по «окнам»: первое сообщение клиента в течение 2 часов после начала окна, затем первый ответ сотрудника.'
+        body: 'Среднее время до ответа сотрудника: сначала по окнам support_response_windows; если после импорта legacy-данных их нет — по парам сообщений «клиент → следующий ответ в тему». Если данных мало, показываем «Недостаточно данных», это не ошибка.'
     },
     abandoned_carts: {
         title: 'Брошенные корзины',
@@ -73,7 +73,7 @@ const DASH_METRIC_HELP = {
     },
     order_sources: {
         title: 'Лучшие источники',
-        body: 'За период: новые клиенты по источнику (first/last в профиле), переходы по ссылкам, заказы, оплаты и сумма. «Без источника» — пользователи без first/last source и заказы без source_code.'
+        body: 'За период: новые клиенты по источнику (first/last в профиле, иначе source_code первого заказа), переходы по ссылкам, заказы и оплаты. «Не определено» — честный режим для клиентов без трекинга (legacy), это не сбой.'
     }
 };
 
@@ -1295,12 +1295,23 @@ async function renderDashboardV2Screen() {
     /** @type {Record<string, any>} */
     const m = payload.metrics || {};
     const topProducts = Array.isArray(payload.topProducts) ? payload.topProducts : [];
+    const revenueK = Math.round(Number(m.revenueKopecks) || 0);
+    const revenueEscaped = esc(formatKopecksAsRub(revenueK));
+    const dashSources = Array.isArray(payload.sources) ? payload.sources : [];
+    const sourcesAnalytics =
+        payload.sourcesAnalytics && typeof payload.sourcesAnalytics === 'object' ? payload.sourcesAnalytics : null;
 
     const speedMinutes = m.avgFirstResponseMinutes;
+    const speedInsufficient = m.avgFirstResponseInsufficientData === true;
     const speedIsNum = typeof speedMinutes === 'number' && Number.isFinite(speedMinutes);
     const speedDanger = speedIsNum && speedMinutes > 12;
     const speedSuffix = speedDanger ? ' — выше нормы' : '';
-    const speedText = speedIsNum ? `${Math.round(speedMinutes)} мин${speedSuffix}` : 'нет данных';
+    let speedText = 'Недостаточно данных';
+    if (speedIsNum) {
+        speedText = `${Math.round(speedMinutes)} мин${speedSuffix}`;
+    } else if (!speedInsufficient) {
+        speedText = 'нет данных';
+    }
 
     const ac = m.abandonedCarts && typeof m.abandonedCarts === 'object' ? m.abandonedCarts : null;
     const acExpanded = !!state.dashboardAbandonedExpanded;
@@ -1424,12 +1435,22 @@ async function renderDashboardV2Screen() {
                 </div>
             </div>`;
     })();
+    const sourcesLegacyNote =
+        sourcesAnalytics &&
+        typeof sourcesAnalytics.legacyTrackingNote === 'string' &&
+        sourcesAnalytics.legacyTrackingNote.trim()
+            ? `<p class="dashboard-v2__period-hint" style="margin-top:10px">${esc(
+                  sourcesAnalytics.legacyTrackingNote
+              )}</p>`
+            : '';
     const sourcesBlockInner =
         dashSources.length === 0
             ? `<div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>`
-            : dashSources
+            : `${dashSources
                   .map((s) => {
-                      const title = esc(String((s && s.title) || (s && s.code) || ''));
+                      const titleRaw = s && s.title != null ? String(s.title) : '';
+                      const codeRaw = s && s.code != null ? String(s.code) : '';
+                      const title = esc(titleRaw.trim() || codeRaw.trim() || 'Не определено');
                       const clients = formatNum(Number(s && s.clientsCount) || 0);
                       const clicks = formatNum(Number(s && s.clicks) || 0);
                       const ord = formatNum(Number(s && s.ordersCount) || 0);
@@ -1447,7 +1468,7 @@ async function renderDashboardV2Screen() {
                 <div class="dashboard-v2__source-meta">Клиентов: ${clients} · Переходов: ${clicks} · Заказов: ${ord} · Оплат: ${paid} · ${rev}</div>
             </div>`;
                   })
-                  .join('');
+                  .join('')}${sourcesLegacyNote}`;
 
     return `
         <div class="dashboard-v2 screen-enter">
@@ -1674,6 +1695,13 @@ function formatOrderListDate(iso) {
     return raw.slice(0, 16).replace('T', ' ');
 }
 
+/** Подпись источника без «undefined» и без служебного отображения кода трекинга как ошибки. */
+function formatAdminSourceLabel(code) {
+    const c = String(code || '').trim();
+    if (!c || c === '__none__') return 'Не определено';
+    return c;
+}
+
 async function renderClientsNewScreen() {
     migrateDashboardDatesInState({});
     let wrap;
@@ -1712,7 +1740,7 @@ async function renderClientsNewScreen() {
                 const rev = formatKopecksAsRub(c.total_revenue_kopecks || 0);
                 const un = c.username ? `@${esc(c.username)}` : esc(c.telegram_id);
                 const ph = c.phone ? ` · ${esc(c.phone)}` : '';
-                const metaDate = c.first_seen_at || c.first_order_at;
+                const metaDate = c.effective_first_seen_at || c.first_seen_at || c.first_order_at;
                 const metaStr = metaDate ? esc(formatOrderListDate(metaDate)) : '—';
                 return `<button type="button" class="mini-client-row" data-action="open-client-v2-card" data-id="${id}" data-list="new">
                 <div class="mini-client-row__top">
@@ -1783,16 +1811,13 @@ async function renderClientCardV2Screen() {
         return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Клиент не найден</div></div>`;
     }
     const titleName = esc(d.full_name || d.username || d.telegram_id);
-    const dateHdr = d.first_seen_at
-        ? esc(formatOrderListDate(d.first_seen_at))
-        : d.first_order_at
-          ? esc(formatOrderListDate(d.first_order_at))
-          : '—';
+    const heroDateRaw = d.effective_first_seen_at || d.first_seen_at || d.first_order_at;
+    const dateHdr = heroDateRaw ? esc(formatOrderListDate(heroDateRaw)) : '—';
     const idLine = esc(String(d.telegram_id));
     const pillOrders = formatNum(d.total_orders || 0);
     const pillSum = formatKopecksAsRub(d.total_revenue_kopecks || 0);
     const phone = d.phone ? esc(d.phone) : '—';
-    const src = d.source_code ? esc(d.source_code) : '—';
+    const src = esc(formatAdminSourceLabel(d.source_code));
     const tg = d.username ? `@${esc(d.username)}` : '—';
     const bonus = formatNum(d.bonus_balance || 0);
 
@@ -1811,7 +1836,13 @@ async function renderClientCardV2Screen() {
         </div>
         <div class="client-v2-grid">
             <div class="client-v2-k">Первый заказ</div><div class="client-v2-v">${d.first_order_at ? esc(formatOrderListDate(d.first_order_at)) : '—'}</div>
-            <div class="client-v2-k">В боте с</div><div class="client-v2-v">${d.first_seen_at ? esc(formatOrderListDate(d.first_seen_at)) : '—'}</div>
+            <div class="client-v2-k">В боте с</div><div class="client-v2-v">${
+                d.effective_first_seen_at
+                    ? esc(formatOrderListDate(d.effective_first_seen_at))
+                    : d.first_seen_at
+                      ? esc(formatOrderListDate(d.first_seen_at))
+                      : '—'
+            }</div>
             <div class="client-v2-k">Телефон</div><div class="client-v2-v">${phone}</div>
             <div class="client-v2-k">Источник</div><div class="client-v2-v">${src}</div>
             <div class="client-v2-k">Telegram</div><div class="client-v2-v">${tg}</div>

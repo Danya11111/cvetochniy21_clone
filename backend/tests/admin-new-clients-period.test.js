@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Новый клиент = пользователь с first_seen_at в периоде (users), не первый заказ.
+ * Новый клиент = пользователь с effective-first-seen в периоде (безопасный COALESCE по активности).
  */
 
 const assert = require('assert');
@@ -58,6 +58,7 @@ async function listNewTelegramIds(db, range) {
         `CREATE TABLE users (
             telegram_id TEXT PRIMARY KEY,
             first_seen_at TEXT,
+            created_at TEXT,
             first_name TEXT,
             first_source_code TEXT,
             last_source_code TEXT
@@ -72,6 +73,26 @@ async function listNewTelegramIds(db, range) {
             total_paid INTEGER DEFAULT 0,
             status TEXT DEFAULT '',
             source_code TEXT
+        )`
+    );
+    await dbRun(
+        db,
+        `CREATE TABLE support_threads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_user_id TEXT UNIQUE NOT NULL,
+            created_at TEXT,
+            updated_at TEXT,
+            status TEXT DEFAULT 'OPEN'
+        )`
+    );
+    await dbRun(
+        db,
+        `CREATE TABLE support_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id INTEGER NOT NULL,
+            direction TEXT NOT NULL,
+            status TEXT DEFAULT 'SENT',
+            created_at TEXT
         )`
     );
 

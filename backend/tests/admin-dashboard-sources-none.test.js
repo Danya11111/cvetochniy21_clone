@@ -109,9 +109,10 @@ function dbAll(db, sql, params = []) {
     );
     const titles = await dbAll(db, `SELECT code, title FROM promotion_sources WHERE COALESCE(is_active, 1) = 1`, []);
     const merged = mergeDashboardSourcesForApi(clicks, orderRows, [], titles);
-    assert.ok(merged.some((x) => x.code === none && x.isSystem === true), 'merge: строка «Без источника»');
+    assert.ok(merged.some((x) => x.code === none && x.isSystem === true), 'merge: строка «Не определено»');
     const noneRow = merged.find((x) => x.code === none);
     assert.strictEqual(noneRow.ordersCount, 2);
+    assert.strictEqual(noneRow.title, 'Не определено');
     assert.strictEqual(noneRow.clicks, 0);
     assert.ok(
         merged.some((x) => x.code === 'tg_bot' && x.clicks === 2 && x.ordersCount === 2),

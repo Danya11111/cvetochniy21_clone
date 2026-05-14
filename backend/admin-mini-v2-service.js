@@ -9,6 +9,7 @@ const {
     getDashboardPeriodRange,
     getCustomDashboardPeriodRange,
     getAllTimeDashboardPeriodRange,
+    sqlUserEffectiveFirstSeenAtExpr,
     sqlUserFirstSeenJulianDay,
     sqlOrderCreatedJulianDay
 } = require('./admin-dashboard-service');
@@ -123,13 +124,15 @@ function buildUsersSearchSqlAndParams(tableAlias, qRaw) {
 
 async function listClientsNewForRange(range, qRaw = '') {
     const revExpr = sqlOrderPaidRevenueKopecks('ox');
-    const jd = sqlUserFirstSeenJulianDay('u.first_seen_at');
+    const effSeen = sqlUserEffectiveFirstSeenAtExpr('u');
+    const jd = sqlUserFirstSeenJulianDay(`(${effSeen})`);
     const { clause: searchClause, params: searchParams } = buildUsersSearchSqlAndParams('u', qRaw);
     const rows = await dbAll(
         `
         SELECT
             TRIM(CAST(u.telegram_id AS TEXT)) AS telegram_id,
             u.first_seen_at,
+            (${effSeen}) AS effective_first_seen_at,
             (SELECT o2.created_at FROM orders o2
              WHERE TRIM(CAST(o2.telegram_id AS TEXT)) = TRIM(CAST(u.telegram_id AS TEXT))
                AND o2.created_at IS NOT NULL
@@ -160,12 +163,12 @@ async function listClientsNewForRange(range, qRaw = '') {
         ) oc ON oc.telegram_id = TRIM(CAST(u.telegram_id AS TEXT))
         WHERE u.telegram_id IS NOT NULL
           AND TRIM('' || u.telegram_id) <> ''
-          AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+          AND TRIM(COALESCE((${effSeen}), '')) <> ''
           AND (${jd}) IS NOT NULL
           AND (${jd}) >= julianday(?)
           AND (${jd}) <= julianday(?)
           ${searchClause}
-        ORDER BY u.first_seen_at DESC, u.telegram_id DESC
+        ORDER BY (${effSeen}) DESC, u.telegram_id DESC
         LIMIT 500
         `,
         [range.periodStartIso, range.periodEndIso, ...searchParams]
@@ -183,6 +186,7 @@ async function listClientsNewForRange(range, qRaw = '') {
             username: r.username || null,
             phone: r.phone_hint ? String(r.phone_hint) : null,
             first_seen_at: r.first_seen_at || null,
+            effective_first_seen_at: r.effective_first_seen_at ? String(r.effective_first_seen_at) : null,
             first_order_at: r.first_order_at || null,
             first_source_code: r.first_source_code ? String(r.first_source_code) : null,
             last_source_code: r.last_source_code ? String(r.last_source_code) : null,
@@ -320,12 +324,24 @@ async function getClientV2Detail(telegramId) {
     const username = u && u.username ? String(u.username) : null;
     const bonus = u ? Math.round(Number(u.bonus_balance || 0)) : 0;
 
+    let effectiveFirstSeenAt = null;
+    if (u) {
+        const effRow = await dbGet(
+            `SELECT (${sqlUserEffectiveFirstSeenAtExpr('u')}) AS eff FROM users u WHERE u.telegram_id = ? LIMIT 1`,
+            [id]
+        );
+        effectiveFirstSeenAt = effRow && effRow.eff ? String(effRow.eff) : null;
+    } else if (agg?.first_order_at) {
+        effectiveFirstSeenAt = String(agg.first_order_at);
+    }
+
     return {
         telegram_id: id,
         full_name: fn || null,
         username,
         phone: phoneRow && phoneRow.phone ? String(phoneRow.phone) : null,
         first_seen_at: u && u.first_seen_at ? String(u.first_seen_at) : null,
+        effective_first_seen_at: effectiveFirstSeenAt,
         source_code: pickSourceCode(u, src && src.source_code, srcLast && srcLast.source_code),
         first_source_code: u && u.first_source_code ? String(u.first_source_code) : (src && src.source_code ? String(src.source_code) : null),
         last_source_code: u && u.last_source_code ? String(u.last_source_code) : (srcLast && srcLast.source_code ? String(srcLast.source_code) : null),

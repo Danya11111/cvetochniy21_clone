@@ -17,7 +17,10 @@ const { fetchAbandonedCartDashboardSnapshot } = require('./abandoned-cart-servic
 const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
 
 const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
-const DASHBOARD_SYSTEM_NONE_TITLE = 'Без источника';
+/** Пользовательский заголовок для bucket без трекинга (не ошибка данных). */
+const DASHBOARD_SYSTEM_NONE_TITLE = 'Не определено';
+const DASHBOARD_LEGACY_SOURCES_NOTE =
+    'Для клиентов, пришедших до внедрения трекинга, источник может быть не определён.';
 const DASHBOARD_TOP_SOURCES_LIMIT = 5;
 
 /**
@@ -49,32 +52,78 @@ function sqlUserFirstSeenJulianDay(colRef) {
     )`;
 }
 
-/** SQL bucket источника пользователя: first_source_code, иначе last, иначе __none__. */
+/**
+ * Устойчивая оценка «первого появления» для аналитики и legacy-БД без корректного first_seen_at.
+ * Не мутирует данные — только SQL-выражение для SELECT/WHERE.
+ */
+function sqlUserEffectiveFirstSeenAtExpr(alias = 'u') {
+    const a = alias;
+    const ordMin = `(SELECT o.created_at FROM orders o
+        WHERE TRIM(CAST(o.telegram_id AS TEXT)) = TRIM(CAST(${a}.telegram_id AS TEXT))
+          AND o.created_at IS NOT NULL AND TRIM(COALESCE(o.created_at, '')) <> ''
+        ORDER BY ${sqlOrderCreatedJulianDay('o.created_at')} ASC
+        LIMIT 1)`;
+    const supMin = `(SELECT sm.created_at FROM support_messages sm
+        INNER JOIN support_threads st ON st.id = sm.thread_id
+        WHERE TRIM(CAST(st.telegram_user_id AS TEXT)) = TRIM(CAST(${a}.telegram_id AS TEXT))
+          AND sm.created_at IS NOT NULL AND TRIM(COALESCE(sm.created_at, '')) <> ''
+        ORDER BY sm.id ASC
+        LIMIT 1)`;
+    const thrMin = `(SELECT st2.created_at FROM support_threads st2
+        WHERE TRIM(CAST(st2.telegram_user_id AS TEXT)) = TRIM(CAST(${a}.telegram_id AS TEXT))
+          AND st2.created_at IS NOT NULL AND TRIM(COALESCE(st2.created_at, '')) <> ''
+        ORDER BY ${sqlOrderCreatedJulianDay('st2.created_at')} ASC
+        LIMIT 1)`;
+    return `
+        COALESCE(
+            NULLIF(TRIM(CAST(${a}.first_seen_at AS TEXT)), ''),
+            NULLIF(TRIM(CAST(${a}.created_at AS TEXT)), ''),
+            ${ordMin},
+            ${supMin},
+            ${thrMin}
+        )
+    `;
+}
+
+/**
+ * Bucket источника для новых клиентов: профиль (first/last), иначе source_code первого заказа,
+ * иначе __none__ (честный «не определено» для legacy без трекинга).
+ */
 function sqlUserSourceBucketExpr(alias = 'u') {
     const a = alias;
     const none = `'${DASHBOARD_SYSTEM_NONE_CODE}'`;
+    const firstOrderSrc = `(
+        SELECT TRIM(o.source_code) FROM orders o
+        WHERE TRIM(CAST(o.telegram_id AS TEXT)) = TRIM(CAST(${a}.telegram_id AS TEXT))
+          AND o.source_code IS NOT NULL AND TRIM(COALESCE(o.source_code, '')) <> ''
+        ORDER BY o.id ASC
+        LIMIT 1
+    )`;
     return `
         CASE
             WHEN NULLIF(TRIM(COALESCE(${a}.first_source_code, '')), '') IS NOT NULL
                 THEN TRIM(${a}.first_source_code)
             WHEN NULLIF(TRIM(COALESCE(${a}.last_source_code, '')), '') IS NOT NULL
                 THEN TRIM(${a}.last_source_code)
+            WHEN NULLIF(TRIM(COALESCE(${firstOrderSrc}, '')), '') IS NOT NULL
+                THEN TRIM(${firstOrderSrc})
             ELSE ${none}
         END
     `;
 }
 
 /**
- * Пользователи, у которых first_seen_at попадает в период (julianday границы как у dashboard).
+ * Пользователи, у которых effective-first-seen попадает в период (julianday границы как у dashboard).
  */
 function getSqlNewUsersInPeriodSubquery() {
-    const jd = sqlUserFirstSeenJulianDay('u.first_seen_at');
+    const eff = sqlUserEffectiveFirstSeenAtExpr('u');
+    const jd = sqlUserFirstSeenJulianDay(`(${eff})`);
     return `
         SELECT TRIM(CAST(u.telegram_id AS TEXT)) AS telegram_id
         FROM users u
         WHERE u.telegram_id IS NOT NULL
           AND TRIM('' || u.telegram_id) <> ''
-          AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+          AND TRIM(COALESCE((${eff}), '')) <> ''
           AND (${jd}) IS NOT NULL
           AND (${jd}) >= julianday(?)
           AND (${jd}) <= julianday(?)
@@ -437,7 +486,8 @@ async function fetchDashboardSourcesForRange(range) {
     const { periodStartIso, periodEndIso } = range;
     const revExpr = sqlOrderPaidRevenueKopecks('o');
     const bucketSql = sqlUserSourceBucketExpr('u');
-    const uJd = sqlUserFirstSeenJulianDay('u.first_seen_at');
+    const effSeen = sqlUserEffectiveFirstSeenAtExpr('u');
+    const uJd = sqlUserFirstSeenJulianDay(`(${effSeen})`);
 
     const [clickRows, orderRows, userBucketRows, promoTitleRows] = await Promise.all([
         dbAll(
@@ -476,7 +526,7 @@ async function fetchDashboardSourcesForRange(range) {
             FROM users u
             WHERE u.telegram_id IS NOT NULL
               AND TRIM('' || u.telegram_id) <> ''
-              AND TRIM(COALESCE(u.first_seen_at, '')) <> ''
+              AND TRIM(COALESCE((${effSeen}), '')) <> ''
               AND (${uJd}) IS NOT NULL
               AND (${uJd}) >= julianday(?)
               AND (${uJd}) <= julianday(?)
@@ -488,6 +538,46 @@ async function fetchDashboardSourcesForRange(range) {
     ]);
 
     return mergeDashboardSourcesForApi(clickRows, orderRows, userBucketRows, promoTitleRows);
+}
+
+/**
+ * Fallback для метрики «скорость ответа», если support_response_windows пуст после импорта legacy-данных:
+ * среднее время от CLIENT_TO_TOPIC до ближайшего следующего TOPIC_TO_CLIENT (SENT).
+ */
+async function fetchSupportAvgResponseMinutesFromMessages(range) {
+    const { periodStartIso, periodEndIso } = range;
+    const row = await dbGet(
+        `
+        SELECT AVG(
+            (julianday(staff.created_at) - julianday(client.created_at)) * 24 * 60
+        ) AS avg_minutes,
+        COUNT(*) AS pair_count
+        FROM support_messages client
+        INNER JOIN support_messages staff
+          ON staff.thread_id = client.thread_id
+         AND staff.id = (
+           SELECT MIN(s2.id) FROM support_messages s2
+           WHERE s2.thread_id = client.thread_id
+             AND s2.id > client.id
+             AND s2.direction = 'TOPIC_TO_CLIENT'
+             AND TRIM(COALESCE(s2.status, '')) IN ('', 'SENT')
+         )
+        WHERE client.direction = 'CLIENT_TO_TOPIC'
+          AND client.created_at >= ? AND client.created_at <= ?
+          AND staff.created_at IS NOT NULL
+          AND TRIM(COALESCE(staff.created_at, '')) <> ''
+          AND (julianday(client.created_at)) IS NOT NULL
+          AND (julianday(staff.created_at)) IS NOT NULL
+          AND julianday(staff.created_at) >= julianday(client.created_at)
+        `,
+        [periodStartIso, periodEndIso]
+    );
+    const pairs = Math.round(Number(row?.pair_count || 0));
+    const avg = row?.avg_minutes;
+    if (!pairs || avg == null || !Number.isFinite(Number(avg))) {
+        return { avgMinutes: null, pairCount: pairs };
+    }
+    return { avgMinutes: Math.round(Number(avg)), pairCount: pairs };
 }
 
 async function hydrateTopProductImages(items) {
@@ -605,8 +695,19 @@ async function fetchDashboardMetricsForRange(range) {
     const avgLtvRub = payingClientsLifetime > 0 ? Math.round(kopecksToWholeRub(lifetimeRevenueK) / payingClientsLifetime) : 0;
     const avgLtvKopecks = payingClientsLifetime > 0 ? Math.round(lifetimeRevenueK / payingClientsLifetime) : 0;
     const avgResp = supportRow?.avg_minutes;
-    const avgResponseMinutes =
+    let avgResponseMinutes =
         avgResp != null && Number.isFinite(Number(avgResp)) ? Math.round(Number(avgResp)) : null;
+
+    let avgResponsePairsFromMessages = 0;
+    if (avgResponseMinutes == null) {
+        const fb = await fetchSupportAvgResponseMinutesFromMessages(range);
+        avgResponsePairsFromMessages = Math.round(Number(fb.pairCount || 0));
+        if (fb.avgMinutes != null && Number.isFinite(Number(fb.avgMinutes))) {
+            avgResponseMinutes = Math.round(Number(fb.avgMinutes));
+        }
+    }
+
+    const avgResponseInsufficientData = avgResponseMinutes == null;
 
     const topRaw = aggregateTopProductsFromOrders(orderRowsArr);
     const topProducts = await hydrateTopProductImages(topRaw);
@@ -625,6 +726,8 @@ async function fetchDashboardMetricsForRange(range) {
         avgLtvRub,
         avgLtvKopecks,
         avgResponseMinutes,
+        avgResponseInsufficientData,
+        avgResponsePairsFromMessages,
         topProducts
     };
 }
@@ -671,6 +774,19 @@ async function getDashboardV2ApiPayload(opts) {
             }
         })()
     ]);
+    const srcArr = Array.isArray(sources) ? sources : [];
+    let sourceKnownCount = 0;
+    let sourceUnknownCount = 0;
+    for (const s of srcArr) {
+        const cc = Math.round(Number(s.clientsCount || 0));
+        if (!cc) continue;
+        if (s.isSystem && String(s.code) === DASHBOARD_SYSTEM_NONE_CODE) sourceUnknownCount += cc;
+        else sourceKnownCount += cc;
+    }
+    const legacyTrackingNote =
+        sourceUnknownCount > 0 && sourceKnownCount === 0 ? DASHBOARD_LEGACY_SOURCES_NOTE : null;
+    const legacyUnknownCount = legacyTrackingNote ? sourceUnknownCount : 0;
+
     return {
         period: periodApi,
         range: {
@@ -690,6 +806,8 @@ async function getDashboardV2ApiPayload(opts) {
             averageLtvKopecks: Math.round(Number(m.avgLtvKopecks || 0)),
             avgFirstResponseMinutes:
                 m.avgResponseMinutes == null ? null : Math.round(Number(m.avgResponseMinutes)),
+            avgFirstResponseInsufficientData: !!m.avgResponseInsufficientData,
+            avgFirstResponsePairSamples: Math.round(Number(m.avgResponsePairsFromMessages || 0)),
             abandonedCarts: abandonedSnapshot
         },
         topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map((row) => {
@@ -707,7 +825,13 @@ async function getDashboardV2ApiPayload(opts) {
                 image_url: row.imageUrl || row.image_url || null
             };
         }),
-        sources: Array.isArray(sources) ? sources : []
+        sourcesAnalytics: {
+            sourceKnownCount,
+            sourceUnknownCount,
+            legacyUnknownCount,
+            legacyTrackingNote
+        },
+        sources: srcArr
     };
 }
 
@@ -726,8 +850,12 @@ module.exports = {
     getSqlNewClientsFirstOrderInRangeSubquery,
     sqlOrderCreatedJulianDay,
     sqlUserFirstSeenJulianDay,
+    sqlUserEffectiveFirstSeenAtExpr,
     sqlUserSourceBucketExpr,
     mergeDashboardSourcesForApi,
     fetchDashboardSourcesForRange,
-    DASHBOARD_SYSTEM_NONE_CODE
+    fetchSupportAvgResponseMinutesFromMessages,
+    DASHBOARD_SYSTEM_NONE_CODE,
+    DASHBOARD_SYSTEM_NONE_TITLE,
+    DASHBOARD_LEGACY_SOURCES_NOTE
 };
