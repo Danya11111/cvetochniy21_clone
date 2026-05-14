@@ -50,6 +50,8 @@ rsync -aH --progress /old/app/backend/data/promotion-uploads/ user@new:/new/app/
 
 Пути к загруженным файлам сохранены в таблицах `promotion_broadcasts` и `promotion_broadcast_images`.
 
+Для аналитики «до заказа» переносите также таблицу **`abandoned_carts`** (снимки состава до checkout; см. `docs/database-migration-ru-to-new-server.md` § B).
+
 ## NPM-алиасы
 
 В `package.json` добавлены удобные вызовы `npm run db:migration:*` (под тем же Bash; на чистой Windows без Git Bash они могут быть недоступны).

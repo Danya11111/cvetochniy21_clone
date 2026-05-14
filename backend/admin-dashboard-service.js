@@ -11,6 +11,7 @@ const {
     kopecksToWholeRub,
     sqlOrderPaidRevenueKopecks
 } = require('./money');
+const { fetchAbandonedCartDashboardSnapshot } = require('./abandoned-cart-service');
 
 /** Должно совпадать с order-status.js (алиас o). */
 const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
@@ -670,7 +671,18 @@ async function getDashboardV2ApiPayload(opts) {
         periodApi = pk;
     }
 
-    const [m, sources] = await Promise.all([fetchDashboardMetricsForRange(range), fetchDashboardSourcesForRange(range)]);
+    const [m, sources, abandonedSnapshot] = await Promise.all([
+        fetchDashboardMetricsForRange(range),
+        fetchDashboardSourcesForRange(range),
+        (async () => {
+            try {
+                return await fetchAbandonedCartDashboardSnapshot(db);
+            } catch (e) {
+                console.warn('[DashboardV2] abandoned_carts_snapshot_failed', e && e.message ? e.message : e);
+                return null;
+            }
+        })()
+    ]);
     return {
         period: periodApi,
         range: {
@@ -690,7 +702,7 @@ async function getDashboardV2ApiPayload(opts) {
             averageLtvKopecks: Math.round(Number(m.avgLtvKopecks || 0)),
             avgFirstResponseMinutes:
                 m.avgResponseMinutes == null ? null : Math.round(Number(m.avgResponseMinutes)),
-            abandonedCarts: null,
+            abandonedCarts: abandonedSnapshot,
             paidCancelledPercent: m.returnsAfterPayPct
         },
         topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map((row) => {

@@ -85,6 +85,7 @@ const { signAdminOpenToken, verifyAdminOpenToken } = require('./admin-open-token
 const { buildTelegramBotCapabilitiesSnapshot } = require('./telegram-bot-capabilities');
 const { createPromotionService } = require('./promotion-service');
 const { createAdminUsersService } = require('./admin-users-service');
+const { createAbandonedCartService } = require('./abandoned-cart-service');
 
 const crypto = require('crypto');
 
@@ -240,6 +241,12 @@ async function markTelegramUpdateProcessed(updateId) {
 const adminUsersService = createAdminUsersService(config, { logger: console });
 const adminAuth = createAdminAuth({ config, adminUsersService, logger: console });
 const adminRepository = createAdminRepository();
+const abandonedCartService = createAbandonedCartService({
+    db,
+    config,
+    telegramClient,
+    logger: console
+});
 const adminRouter = createAdminRouter({
     auth: adminAuth,
     adminRepository,
@@ -249,7 +256,8 @@ const adminRouter = createAdminRouter({
     promotionService,
     telegramClient,
     config,
-    scanStaleMsOrderLinks
+    scanStaleMsOrderLinks,
+    abandonedCartService
 });
 
 function getAdminOpenSecret() {
@@ -855,6 +863,11 @@ function logStartupWiring() {
             '[Startup] SUPPORT_RELAY_ENABLED=true, но TELEGRAM_SUPPORT_NOTIFY_THREAD_ID=0 — уведомления в тему поддержки не отправляются.'
         );
     }
+    if (C.ABANDONED_CARTS_ENABLED && !(Number(C.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0) > 0)) {
+        console.warn(
+            '[Startup] ABANDONED_CARTS_ENABLED=true, но TELEGRAM_TOPIC_ABANDONED_CARTS_ID=0 — уведомления о брошенных корзинах в Telegram не отправляются.'
+        );
+    }
     if (!C.TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED) {
         console.warn(
             '[Startup] TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED=false — исходящие HTTPS к api.telegram.org отключены (уведомления/топики/рассылки через бота не уходят). Проверка подписи Web App initData остаётся локальной.'
@@ -1056,6 +1069,43 @@ app.get('/api/admin/access', async (req, res) => {
 });
 
 app.use('/api/admin', adminRouter);
+
+const abandonedCartJson = express.json({ limit: '128kb' });
+
+function handleAbandonedCartApiError(res, err) {
+    if (err && err.code === 'BAD_REQUEST') {
+        return res.status(400).json({ ok: false, error: 'BAD_REQUEST' });
+    }
+    console.error('[AbandonedCartApi]', err && err.message ? err.message : err);
+    return res.status(500).json({ ok: false, error: 'SERVER_ERROR' });
+}
+
+app.post('/api/abandoned-cart/sync', abandonedCartJson, async (req, res) => {
+    try {
+        const payload = await abandonedCartService.sync(req.body || {});
+        res.json({ ok: true, ...payload });
+    } catch (err) {
+        handleAbandonedCartApiError(res, err);
+    }
+});
+
+app.post('/api/abandoned-cart/checkout-started', abandonedCartJson, async (req, res) => {
+    try {
+        const payload = await abandonedCartService.checkoutStarted(req.body || {});
+        res.json({ ok: true, ...payload });
+    } catch (err) {
+        handleAbandonedCartApiError(res, err);
+    }
+});
+
+app.post('/api/abandoned-cart/recovered', abandonedCartJson, async (req, res) => {
+    try {
+        const payload = await abandonedCartService.markRecovered(req.body || {});
+        res.json({ ok: true, ...payload });
+    } catch (err) {
+        handleAbandonedCartApiError(res, err);
+    }
+});
 
 /**
  * Document navigation: HTML form POST → 303 → GET /admin-embed?h=…
@@ -1494,8 +1544,13 @@ app.post('/api/checkout', async (req, res) => {
             // NEW (у вас уже приходит с фронта)
             email,
             deliveryOption,
-            deliveryFeeRub
+            deliveryFeeRub,
+
+            cartKey,
+            cart_key
         } = req.body;
+
+        const checkoutCartKeyRaw = String(cartKey || cart_key || '').trim();
 
         if (!telegramId || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ ok: false, error: 'BAD_REQUEST' });
@@ -1837,6 +1892,8 @@ app.post('/api/checkout', async (req, res) => {
             email: normEmail,
             deliveryOption: normDeliveryOption
         };
+
+        void abandonedCartService.recoveredSafe(checkoutCartKeyRaw, order.id);
 
         // 2) Решаем, надо ли синхронизировать в МС
         const freshOrder = await new Promise((resolve, reject) => {
@@ -2262,6 +2319,7 @@ async function runProductsSync() {
 }
 
 let productSyncInterval = null;
+let abandonedCartScanInterval = null;
 let outboxInterval = null;
 let transportProbeController = null;
 let pausedTransportSweepInterval = null;
@@ -2269,6 +2327,7 @@ let pausedTransportSweepInterval = null;
 function shutdownGracefully(signal) {
     console.log(`[Shutdown] ${signal} received`);
     if (productSyncInterval) clearInterval(productSyncInterval);
+    if (abandonedCartScanInterval) clearInterval(abandonedCartScanInterval);
     if (outboxInterval) clearInterval(outboxInterval);
     if (pausedTransportSweepInterval) clearInterval(pausedTransportSweepInterval);
     if (transportProbeController && typeof transportProbeController.stop === 'function') {
@@ -2338,6 +2397,20 @@ process.on('SIGINT', () => shutdownGracefully('SIGINT'));
                 console.error('[OutboxWorker] tick failed:', e.message || e);
             });
         }, Number(OUTBOX_WORKER_INTERVAL_MS || 5000));
+    }
+
+    if (config.ABANDONED_CARTS_ENABLED) {
+        const ivMin = Math.max(1, Number(config.ABANDONED_CART_SCAN_INTERVAL_MINUTES || 5));
+        abandonedCartScanInterval = setInterval(() => {
+            abandonedCartService.scanAndProcess().catch((e) => {
+                console.error('[AbandonedCart] scan_tick_failed', e.message || e);
+            });
+        }, ivMin * 60 * 1000);
+        abandonedCartScanInterval.unref?.();
+        console.log('[AbandonedCart] scheduler_started', { intervalMinutes: ivMin });
+        abandonedCartService.scanAndProcess().catch((e) => {
+            console.error('[AbandonedCart] startup_scan_failed', e.message || e);
+        });
     }
 
     if (TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED && typeof broadcastService.tryAutoResumePausedTransportCampaigns === 'function') {

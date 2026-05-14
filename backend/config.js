@@ -154,6 +154,13 @@ function resolveThreadFromEnv(keys, fallbackNum) {
 /* Списоковые алиасы thread (см. resolveThreadId) — explicit process.env.* для discoverability / verify:manifest */
 if (0) {
     void process.env.APP_PUBLIC_URL;
+    void process.env.ABANDONED_CARTS_ENABLED;
+    void process.env.ABANDONED_CART_AFTER_MINUTES;
+    void process.env.ABANDONED_CART_NOTIFY_AFTER_MINUTES;
+    void process.env.ABANDONED_CART_REPEAT_NOTIFY_HOURS;
+    void process.env.ABANDONED_CART_MAX_NOTIFICATIONS;
+    void process.env.ABANDONED_CART_EXPIRE_DAYS;
+    void process.env.ABANDONED_CART_SCAN_INTERVAL_MINUTES;
     void process.env.TELEGRAM_SUPERGROUP_ID;
     void process.env.TELEGRAM_TOPIC_ORDERS_ID;
     void process.env.TELEGRAM_TOPIC_ERRORS_ID;
@@ -286,6 +293,14 @@ module.exports = {
     ),
     /** Зарезервировано под сервисные уведомления (пока не используется в коде отправки). */
     TELEGRAM_TOPIC_ABANDONED_CARTS_ID: envInt('TELEGRAM_TOPIC_ABANDONED_CARTS_ID', 0),
+
+    ABANDONED_CARTS_ENABLED: envBool('ABANDONED_CARTS_ENABLED', false),
+    ABANDONED_CART_AFTER_MINUTES: envInt('ABANDONED_CART_AFTER_MINUTES', 30),
+    ABANDONED_CART_NOTIFY_AFTER_MINUTES: envInt('ABANDONED_CART_NOTIFY_AFTER_MINUTES', 30),
+    ABANDONED_CART_REPEAT_NOTIFY_HOURS: envInt('ABANDONED_CART_REPEAT_NOTIFY_HOURS', 24),
+    ABANDONED_CART_MAX_NOTIFICATIONS: envInt('ABANDONED_CART_MAX_NOTIFICATIONS', 2),
+    ABANDONED_CART_EXPIRE_DAYS: envInt('ABANDONED_CART_EXPIRE_DAYS', 30),
+    ABANDONED_CART_SCAN_INTERVAL_MINUTES: envInt('ABANDONED_CART_SCAN_INTERVAL_MINUTES', 5),
 
     BROADCAST_TOPIC_TEST_MODE: envBool('BROADCAST_TOPIC_TEST_MODE', true),
     BROADCAST_TOPIC_TEST_TELEGRAM_IDS: envList('BROADCAST_TOPIC_TEST_TELEGRAM_IDS', ['67460775', '659921032']),

@@ -369,6 +369,39 @@ db.serialize(() => {
     `);
 
     db.run(`
+        CREATE TABLE IF NOT EXISTS abandoned_carts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cart_key TEXT UNIQUE NOT NULL,
+            tg_user_id TEXT NULL,
+            customer_name TEXT NULL,
+            customer_phone TEXT NULL,
+            customer_address TEXT NULL,
+            items_json TEXT NOT NULL DEFAULT '[]',
+            total_amount INTEGER DEFAULT 0,
+            currency TEXT DEFAULT 'RUB',
+            status TEXT NOT NULL DEFAULT 'active',
+            order_id INTEGER NULL,
+            source TEXT NULL,
+            user_agent TEXT NULL,
+            last_seen_at TEXT NOT NULL,
+            checkout_started_at TEXT NULL,
+            recovered_at TEXT NULL,
+            cleared_at TEXT NULL,
+            first_notified_at TEXT NULL,
+            last_notified_at TEXT NULL,
+            notification_count INTEGER DEFAULT 0,
+            next_notification_at TEXT NULL,
+            last_error TEXT NULL,
+            metadata_json TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_abandoned_carts_cart_key ON abandoned_carts(cart_key)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_abandoned_carts_status ON abandoned_carts(status)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_abandoned_carts_last_seen ON abandoned_carts(last_seen_at)');
+
+    db.run(`
         CREATE TABLE IF NOT EXISTS telegram_processed_updates (
             update_id INTEGER PRIMARY KEY,
             processed_at TEXT

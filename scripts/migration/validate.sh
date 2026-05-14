@@ -61,6 +61,7 @@ TABLES=(
   runtime_flags
   admin_users
   admin_action_logs
+  abandoned_carts
   promotion_sources
   promotion_source_clicks
   promotion_broadcasts
@@ -80,6 +81,15 @@ for t in "${TABLES[@]}"; do
     printf '  %-40s %s\n' "${t}" "(absent)"
   fi
 done
+
+ac_exists="$(sqlite3 "${DB_PATH}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='abandoned_carts';")"
+if [[ "${ac_exists}" == "1" ]]; then
+  echo "[validate] abandoned_carts by status"
+  sqlite3 "${DB_PATH}" "SELECT printf('%s: %s', status, COUNT(*)) FROM abandoned_carts GROUP BY status ORDER BY status;" |
+    while IFS= read -r line; do
+      printf '  %s\n' "${line}"
+    done
+fi
 
 echo "[validate] Note: there is NO order_items table; line items live in orders.items_json"
 echo "[validate] OK"

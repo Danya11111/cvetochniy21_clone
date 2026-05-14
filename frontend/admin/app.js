@@ -8,7 +8,8 @@ const MINI_APP_SCREEN_IDS = [
     'clients_new',
     'clients_all',
     'client_card',
-    'admins'
+    'admins',
+    'abandoned_carts'
 ];
 
 const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
@@ -25,7 +26,8 @@ const SCREEN_META = {
     clients_new: { title: 'Новые клиенты', subtitle: '', nav: 'dashboard' },
     clients_all: { title: 'Все клиенты', subtitle: '', nav: 'dashboard' },
     client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' },
-    admins: { title: 'Администраторы', subtitle: 'Доступ в Mini App', nav: 'dashboard' }
+    admins: { title: 'Администраторы', subtitle: 'Доступ в Mini App', nav: 'dashboard' },
+    abandoned_carts: { title: 'Брошенные корзины', subtitle: 'Серверный снимок до заказа', nav: 'dashboard' }
 };
 
 /** Справка по метрикам дашборда v2 (тап для bottom-sheet на мобильных). */
@@ -63,7 +65,7 @@ const DASH_METRIC_HELP = {
     },
     abandoned_carts: {
         title: 'Брошенные корзины',
-        body: 'Пока не рассчитывается: серверных данных о брошенных корзинах нет.'
+        body: 'Снимки корзин до оформления заказа на сервере (не цены для оплаты). Короткая строка — сводка статусов «активные» (включая оформление), «брошено», «уведомлено», «восстановлено». Тапните строку, чтобы открыть список.'
     },
     returns_cancel: {
         title: 'Возвраты / отмены после оплаты',
@@ -173,7 +175,8 @@ const state = {
     promoFlash: '',
     ordersV2RangeLabel: '',
     /** @type {string} */
-    adminsManageFlash: ''
+    adminsManageFlash: '',
+    abandonedCartFilter: 'all'
 };
 
 function loadUiState() {
@@ -213,7 +216,8 @@ function loadUiState() {
             'clientsContextFilter',
             'clientsContextQ',
             'broadcastsContextFilter',
-            'activePlaybook'
+            'activePlaybook',
+            'abandonedCartFilter'
         ];
         keys.forEach((key) => {
             if (Object.prototype.hasOwnProperty.call(saved, key)) {
@@ -251,7 +255,8 @@ function saveUiState() {
             clientsContextFilter: state.clientsContextFilter,
             clientsContextQ: state.clientsContextQ,
             broadcastsContextFilter: state.broadcastsContextFilter,
-            activePlaybook: state.activePlaybook
+            activePlaybook: state.activePlaybook,
+            abandonedCartFilter: state.abandonedCartFilter
         };
         window.localStorage.setItem(UI_STATE_KEY, JSON.stringify(payload));
     } catch (_) {}
@@ -1105,6 +1110,7 @@ function renderShell(contentHtml) {
     else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
     else if (state.currentScreen === 'orders') headerBackAction = 'orders-back';
     else if (state.currentScreen === 'admins') headerBackAction = 'admins-back';
+    else if (state.currentScreen === 'abandoned_carts') headerBackAction = 'abandoned-carts-back';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
         contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
@@ -1295,6 +1301,13 @@ async function renderDashboardV2Screen() {
     const cancelSuffix = cancelDanger ? ' — выше нормы' : '';
     const cancelText = cancelIsNum ? `${dashboardFormatPct(cancelPctRaw)}%${cancelSuffix}` : 'нет данных';
 
+    const ac = m.abandonedCarts && typeof m.abandonedCarts === 'object' ? m.abandonedCarts : null;
+    const abandonedLineHtml = ac
+        ? `акт. ${formatNum(ac.active || 0)} · брош. ${formatNum(ac.abandoned || 0)} · увед. ${formatNum(
+              ac.notified || 0
+          )} · восст. ${formatNum(ac.recovered || 0)} · конв. ${dashboardFormatPct(ac.recoveryVsAbandonPct || 0)}%`
+        : 'нет данных';
+
     /*
      * Proxy CR: paid_orders_count / orders_count · 100 за период (не конверсия «визит → покупка»).
      * Источник и определение — см. backend/admin-dashboard-service.js.
@@ -1427,7 +1440,9 @@ async function renderDashboardV2Screen() {
             <h3 class="dashboard-v2__section-title">Сервис и качество</h3>
             <div class="dashboard-v2__stack">
                 ${renderDashMetricRow('Скорость ответа', esc(speedText), speedDanger, 'response_time')}
-                ${renderDashMetricRow('Брошенные корзины', esc('нет данных'), false, 'abandoned_carts')}
+                <button type="button" class="dashboard-v2__dash-row" data-action="open-abandoned-carts" aria-label="Брошенные корзины, открыть список">
+                    <span>${esc('Брошенные корзины')}</span><strong>${ac ? esc(abandonedLineHtml) : esc('нет данных')}</strong>
+                </button>
                 ${renderDashMetricRow('Возвраты / отмены после оплаты', esc(cancelText), cancelDanger, 'returns_cancel')}
             </div>
 
@@ -1444,6 +1459,100 @@ async function renderDashboardV2Screen() {
             </button>
             <article class="dashboard-v2__card dashboard-v2__card--muted dashboard-v2__card--sources">${sourcesBlockInner}</article>
         </div>`;
+}
+
+function formatAbandonedCartItemsPreview(itemsJson, limit = 10) {
+    try {
+        const a = JSON.parse(String(itemsJson || '[]'));
+        if (!Array.isArray(a)) return '—';
+        return a
+            .slice(0, limit)
+            .map((it) => `${String((it && it.name) || 'Товар').trim()} × ${Number((it && it.quantity) || 1)}`)
+            .join('; ');
+    } catch (_) {
+        return '—';
+    }
+}
+
+async function renderAbandonedCartsScreen() {
+    const mod = adminConfig && adminConfig.modules && adminConfig.modules.abandoned_carts;
+    if (!mod) {
+        return `<div class="dashboard-v2 screen-enter"><p class="list-card-meta">Раздел недоступен в конфигурации сервера.</p></div>`;
+    }
+    const filt = String(state.abandonedCartFilter || 'all').trim().toLowerCase();
+    const qs =
+        filt && filt !== 'all'
+            ? `?status=${encodeURIComponent(filt)}&limit=200`
+            : '?limit=200';
+    let rows = [];
+    try {
+        const pack = await api(`/api/admin/abandoned-carts${qs}`);
+        rows = Array.isArray(pack.data) ? pack.data : [];
+    } catch (e) {
+        return errorState(e.message || 'Не удалось загрузить корзины');
+    }
+
+    function opt(value, label) {
+        return `<option value="${esc(value)}" ${filt === value ? 'selected' : ''}>${esc(label)}</option>`;
+    }
+
+    const filters = `
+        <form id="abandonedCartsFilterForm" class="mini-clients-search" style="flex-wrap:wrap;gap:8px">
+            <label class="list-card-meta" style="display:flex;align-items:center;gap:8px">
+                Статус
+                <select name="status">
+                    ${opt('all', 'Все')}
+                    ${opt('active', 'active')}
+                    ${opt('checkout_started', 'checkout_started')}
+                    ${opt('abandoned', 'abandoned')}
+                    ${opt('notified', 'notified')}
+                    ${opt('recovered', 'recovered')}
+                    ${opt('cleared', 'cleared')}
+                    ${opt('expired', 'expired')}
+                </select>
+            </label>
+            <button type="submit" class="secondary">Применить</button>
+            <button type="button" class="secondary" data-action="reload-screen">Обновить</button>
+        </form>`;
+
+    const list = rows.length
+        ? rows
+              .map((r) => {
+                  const id = Number(r.id);
+                  const pv = esc(formatAbandonedCartItemsPreview(r.items_json, 12));
+                  const money = formatKopecksAsRub(r.total_amount || 0);
+                  const nf = Number(r.notification_count || 0);
+                  const oid = r.order_id != null && String(r.order_id).trim() !== '' ? `#${esc(String(r.order_id))}` : '—';
+                  const err =
+                      r.last_error && String(r.last_error).trim()
+                          ? `<p class="list-card-meta" style="opacity:.85;">Ошибка: ${esc(String(r.last_error).slice(0, 360))}</p>`
+                          : '';
+                  return `
+            <article class="list-card">
+                <div class="list-card-footer">
+                    <h3 class="list-card-title">Корзина #${esc(id)}</h3>
+                    ${statusBadge(String(r.status || '—'), 'info')}
+                </div>
+                <p class="mono list-card-meta" style="word-break:break-all;">cart_key: ${esc(String(r.cart_key || ''))}</p>
+                <p class="list-card-meta">Последняя активность: ${esc(formatOrderListDate(r.last_seen_at))} · Уведомлений: ${esc(String(nf))} · Заказ: ${oid}</p>
+                <p class="list-card-meta">${esc([r.customer_name, r.customer_phone].filter(Boolean).join(' · '))}</p>
+                <p class="list-card-meta"><strong>${esc(money)}</strong> · ${pv}</p>
+                ${err}
+                <div class="list-card-footer" style="flex-wrap:wrap;gap:8px">
+                    <button type="button" class="secondary" data-action="abandoned-cart-expire" data-id="${esc(String(id))}">Пометить expired</button>
+                    <button type="button" class="secondary" data-action="abandoned-cart-notify" data-id="${esc(String(id))}">Уведомить сейчас</button>
+                </div>
+            </article>`;
+              })
+              .join('')
+        : '<p class="list-card-meta">Нет записей для выбранного фильтра.</p>';
+
+    return `
+    <div class="dashboard-v2 screen-enter">
+        ${sectionHeader('Брошенные корзины', 'Снимок до оформления; суммы не используются для оплаты')}
+        ${filters}
+        <div class="mini-clients-stack">${list}</div>
+    </div>`;
 }
 
 async function renderAdminsScreen() {
@@ -3318,6 +3427,7 @@ async function renderScreenContent() {
     if (state.currentScreen === 'client_card') return renderClientCardV2Screen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
     if (state.currentScreen === 'admins') return renderAdminsScreen();
+    if (state.currentScreen === 'abandoned_carts') return renderAbandonedCartsScreen();
     return renderDashboardV2Screen();
 }
 
@@ -3389,6 +3499,15 @@ function bindForms() {
                 state.adminsManageFlash = friendlyActionError(String(e.message || ''));
             }
             await renderApp();
+        });
+    }
+    const acForm = document.getElementById('abandonedCartsFilterForm');
+    if (acForm) {
+        acForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const fd = new FormData(acForm);
+            state.abandonedCartFilter = String(fd.get('status') || 'all').trim().toLowerCase();
+            renderApp();
         });
     }
 }
@@ -3545,6 +3664,54 @@ async function handleAction(action, value, eventTarget) {
     }
     if (action === 'admins-back') {
         navigateTo('dashboard');
+        return;
+    }
+    if (action === 'open-abandoned-carts') {
+        navigateTo('abandoned_carts');
+        return;
+    }
+    if (action === 'abandoned-carts-back') {
+        navigateTo('dashboard');
+        return;
+    }
+    if (action === 'abandoned-cart-expire') {
+        const id = Number(value);
+        if (!id) return;
+        openConfirmationSheet(
+            {
+                title: 'Пометить корзину как expired?',
+                message: `Корзина #${id} будет помечена как устаревшая.`,
+                severity: 'normal',
+                confirm_label: 'Пометить',
+                cancel_label: 'Отмена'
+            },
+            async () => {
+                await runGuardedAction(`abandoned-expire-${id}`, async () => {
+                    await api(`/api/admin/abandoned-carts/${id}/mark-expired`, { method: 'POST' });
+                });
+            }
+        );
+        await renderApp();
+        return;
+    }
+    if (action === 'abandoned-cart-notify') {
+        const id = Number(value);
+        if (!id) return;
+        openConfirmationSheet(
+            {
+                title: 'Отправить уведомление в Telegram?',
+                message: `Повторная отправка в тему брошенных корзин для #${id}. Учитывайте лимиты Telegram.`,
+                severity: 'normal',
+                confirm_label: 'Отправить',
+                cancel_label: 'Отмена'
+            },
+            async () => {
+                await runGuardedAction(`abandoned-notify-${id}`, async () => {
+                    await api(`/api/admin/abandoned-carts/${id}/notify-now`, { method: 'POST' });
+                });
+            }
+        );
+        await renderApp();
         return;
     }
     if (action === 'admin-remove') {

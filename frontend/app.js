@@ -59,8 +59,149 @@ let cardText = '';
 
 // ===== Cart persistence (TTL) =====
 const CART_STORAGE_KEY = 'f21_cart_blob_v1';
+const CART_KEY_STORAGE = 'f21_cart_key_v1';
 const CART_STORAGE_TTL_DAYS = 14; // <-- поставьте 7-30 как нужно
 const CART_STORAGE_TTL_MS = CART_STORAGE_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+let abandonedCartSyncTimer = null;
+let abandonedCartCheckoutTimer = null;
+
+function generateUuidV4() {
+    try {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    } catch (_) {}
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+    });
+}
+
+function getOrCreateCartKey() {
+    try {
+        const existing = localStorage.getItem(CART_KEY_STORAGE);
+        if (existing && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existing.trim())) {
+            return existing.trim();
+        }
+        const k = generateUuidV4();
+        localStorage.setItem(CART_KEY_STORAGE, k);
+        return k;
+    } catch (_) {
+        return '';
+    }
+}
+
+function rotateCartKey() {
+    try {
+        const k = generateUuidV4();
+        localStorage.setItem(CART_KEY_STORAGE, k);
+        return k;
+    } catch (_) {
+        return '';
+    }
+}
+
+function abandonedCartPayloadBase() {
+    const cartKey = getOrCreateCartKey();
+    if (!cartKey) return null;
+    const items = cart.map((c) => ({
+        productId: c.productId,
+        msId: c.msId,
+        name: c.name,
+        price: c.price,
+        quantity: c.quantity
+    }));
+    const itemsTotalRub = cart.reduce((s, c) => s + Number(c.price || 0) * Number(c.quantity || 0), 0);
+    return {
+        cart_key: cartKey,
+        items,
+        total_kopecks: Math.round(itemsTotalRub * 100),
+        source: 'miniapp',
+        user_agent:
+            typeof navigator !== 'undefined' && navigator.userAgent
+                ? String(navigator.userAgent).slice(0, 320)
+                : '',
+        telegram_id: telegramId || undefined
+    };
+}
+
+async function postAbandonedCartJson(path, jsonBody) {
+    try {
+        const res = await fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(jsonBody || {})
+        });
+        await res.json().catch(() => ({}));
+    } catch (_) {
+        /** fail-open: витрина не зависит от серверного трекинга */
+    }
+}
+
+function scheduleAbandonedCartSync() {
+    if (!getOrCreateCartKey()) return;
+    if (abandonedCartSyncTimer) clearTimeout(abandonedCartSyncTimer);
+    abandonedCartSyncTimer = setTimeout(() => {
+        abandonedCartSyncTimer = null;
+        const payload = abandonedCartPayloadBase();
+        if (payload) void postAbandonedCartJson('/api/abandoned-cart/sync', payload);
+    }, 650);
+}
+
+function attachCheckoutAbandonedCartHandlers() {
+    const ids = ['checkoutFirstName', 'checkoutLastName', 'checkoutPhone', 'newAddressInput', 'deliveryDate', 'pickupDate', 'pickupTime'];
+    for (const id of ids) {
+        const el = document.getElementById(id);
+        if (!el || el.dataset.f21AbandonBound === '1') continue;
+        el.dataset.f21AbandonBound = '1';
+        el.addEventListener(
+            'change',
+            () => {
+                scheduleCheckoutStartedAbandonedCart();
+            },
+            { passive: true }
+        );
+        el.addEventListener(
+            'blur',
+            () => {
+                scheduleCheckoutStartedAbandonedCart();
+            },
+            { passive: true }
+        );
+    }
+    document.querySelectorAll('input[name="checkoutAddress"]').forEach((r) => {
+        if (r.dataset.f21AbandonBound === '1') return;
+        r.dataset.f21AbandonBound = '1';
+        r.addEventListener('change', () => scheduleCheckoutStartedAbandonedCart(), { passive: true });
+    });
+}
+
+function scheduleCheckoutStartedAbandonedCart() {
+    const key = getOrCreateCartKey();
+    if (!key) return;
+    if (abandonedCartCheckoutTimer) clearTimeout(abandonedCartCheckoutTimer);
+    abandonedCartCheckoutTimer = setTimeout(() => {
+        abandonedCartCheckoutTimer = null;
+        const firstName = document.getElementById('checkoutFirstName')?.value?.trim() || '';
+        const lastName = document.getElementById('checkoutLastName')?.value?.trim() || '';
+        const phone = document.getElementById('checkoutPhone')?.value?.trim() || '';
+        const newAddressInput = document.getElementById('newAddressInput');
+        const radioSelected = document.querySelector('input[name="checkoutAddress"]:checked');
+        const address =
+            checkoutDeliveryMethod === 'delivery'
+                ? radioSelected
+                    ? String(radioSelected.value || '').trim()
+                    : String(newAddressInput?.value || '').trim()
+                : '';
+        const name = `${firstName} ${lastName}`.trim();
+        void postAbandonedCartJson('/api/abandoned-cart/checkout-started', {
+            cart_key: key,
+            customer_name: name || null,
+            customer_phone: phone || null,
+            customer_address: address || null
+        });
+    }, 900);
+}
 
 function isCurrentAdminUser() {
     return !!adminEntryAllowed;
@@ -292,6 +433,7 @@ function saveCartState() {
     } catch {
         // ignore
     }
+    scheduleAbandonedCartSync();
 }
 
 function isPickupSelected(){
@@ -1989,6 +2131,13 @@ function openCheckoutModal() {
     setCheckoutDeliveryMethod(checkoutDeliveryMethod);
 
     validateCheckoutForm({ showErrors: false });
+
+    attachCheckoutAbandonedCartHandlers();
+    const ck = getOrCreateCartKey();
+    if (ck) {
+        void postAbandonedCartJson('/api/abandoned-cart/checkout-started', { cart_key: ck });
+        scheduleCheckoutStartedAbandonedCart();
+    }
 }
 
 
@@ -2370,6 +2519,7 @@ async function confirmCheckout() {
             deliveryTime: deliveryTimeInterval,
 
             useBonuses: false,
+            cartKey: getOrCreateCartKey() || undefined,
             items: cart.map(c => ({
                 productId: c.productId,
                 msId: c.msId,
@@ -2413,6 +2563,15 @@ async function confirmCheckout() {
 
         waitForOrderCompletion(orderId).then(success => {
             if (!success) return;
+
+            const recoveredKey = getOrCreateCartKey();
+            if (recoveredKey) {
+                void postAbandonedCartJson('/api/abandoned-cart/recovered', {
+                    cart_key: recoveredKey,
+                    order_id: orderId
+                });
+            }
+            rotateCartKey();
 
             cart = [];
             try { localStorage.removeItem(CART_STORAGE_KEY); } catch (_) {}
@@ -2816,7 +2975,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof restored.floristComment === 'string') floristComment = restored.floristComment; // у вас есть, но не используется — оставляем
         if (typeof restored.cardText === 'string') cardText = restored.cardText;
     }
-
+    getOrCreateCartKey();
     initTelegram().catch((e) => {
         console.error('initTelegram error', e);
     });
