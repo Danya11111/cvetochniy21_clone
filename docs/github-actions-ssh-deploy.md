@@ -6,7 +6,7 @@
 
 - Перенос SQLite и данных: [database-migration-ru-to-new-server.md](./database-migration-ru-to-new-server.md)
 - Смоук-тест после выката: [production-smoke-test-checklist.md](./production-smoke-test-checklist.md)
-- Примеры systemd в репозитории: `deploy/systemd/cvet21.service.example`, `deploy/cvetochniy21.service.example`
+- Примеры systemd в репозитории: **`deploy/systemd/cvet21.service.example`** (рекомендуемый для production, см. `deploy/PRODUCTION-SOURCE-OF-TRUTH-ru.md`) и **`deploy/cvetochniy21.service.example`** (дополнительный пример с именем unit под GitHub Actions). Оба файла остаются в репозитории.
 
 ## A. Что делает CI/CD
 
@@ -29,7 +29,13 @@
 
 5. **После копирования**  
    - В `$DEPLOY_PATH`: `npm ci --omit=dev` при наличии `package-lock.json`, иначе `npm install --omit=dev`.  
-   - Перезапуск см. раздел ниже.
+   - Перезапуск: `scripts/gha-remote-post-rsync.sh` вызывает **`systemctl restart`** или **`pm2 restart`** в таком порядке:
+     1. `cvetochniy21.service`
+     2. `cvet21.service`
+     3. `f21.service`
+     4. pm2 **`cvetochniy21`**
+     5. pm2 **`cvet21`**
+     6. pm2 **`f21`**
 
 6. **Healthcheck (мягкий)**  
    - Скрипт `scripts/gha-remote-healthcheck-soft.sh`: если есть `curl` и в `.env` найден `APP_PUBLIC_URL` или `BASE_URL`, выполняется запрос к `${URL}/api/health/ops`, затем при неуспехе к `${URL}/health`.  
@@ -86,18 +92,24 @@
 - В корне деплоя лежит **production `.env`** (создаётся вручную, не из GitHub Actions).
 - **`F21_SQLITE_PATH`** указывает на постоянный файл SQLite вне зоны перезаписи rsync (или на путь, явно исключённый из синхронизации; по умолчанию файл в репо — `backend/database.sqlite` — в rsync **исключён**, чтобы не затереть прод).
 - Файл БД и каталог **`backend/data/promotion-uploads/`** перенесены по [playbook миграции](./database-migration-ru-to-new-server.md), если это новый сервер.
-- Настроен один из вариантов управления процессом (см. workflow):
+- Настроен один из вариантов управления процессом, **имя на сервере должно совпадать** с тем, что ищет деплой:
+  - **systemd:** `cvetochniy21.service`, **`cvet21.service`** (типичный путь: скопировать `deploy/systemd/cvet21.service.example` в `/etc/systemd/system/cvet21.service`) или `f21.service`;
+  - **pm2:** процесс `cvetochniy21`, **`cvet21`** или `f21`.
 
-  - systemd-unit **`cvetochniy21.service`** или **`f21.service`**, **или**
-  - процесс **pm2** с именем **`cvetochniy21`** или **`f21`**.
+Если вы ставите unit по **`deploy/systemd/cvet21.service.example`**, на сервере файл должен называться **`cvet21.service`** (так же указано в комментариях примера). Проверка и перезапуск вручную:
 
-Если у вас уже используется канонический пример **`cvet21.service`** из `deploy/systemd/cvet21.service.example`, workflow его **не перезапускает**. Варианты: установить дополнительный unit с именем `cvetochniy21.service`, symlink, либо использовать **pm2** с именем из списка выше.
+```bash
+systemctl status cvet21.service
+sudo systemctl restart cvet21.service
+```
 
 Для **systemd**: пользователь `DEPLOY_USER` должен иметь возможность выполнять `sudo systemctl restart …` **без интерактивного пароля**, если рестарт идёт через `sudo` (см. раздел G).
 
 ## F. Пример systemd unit
 
-Пример с корректным `Environment=NODE_ENV=production` (отдельной строки `NODE_ENV=...` в секции `[Service]` в unit-файле быть не должно):
+**Рекомендуемый канонический пример** в этом репозитории — `deploy/systemd/cvet21.service.example` (переменные через `EnvironmentFile`, пользователь `www-data`, пути из вашего runbook). Дополнительно есть `deploy/cvetochniy21.service.example` (короткий шаблон под имя `cvetochniy21.service`), если удобнее держать unit с таким именем; workflow поддерживает **оба** имени unit (и `cvet21`, и `cvetochniy21`).
+
+Пример с корректным `Environment=NODE_ENV=production` (отдельной строки `NODE_ENV=...` в секции `[Service]` в unit-файле быть не должно). Ниже — упрощённый фрагмент в духе `deploy/cvetochniy21.service.example`:
 
 Пример в репозитории: [deploy/cvetochniy21.service.example](../deploy/cvetochniy21.service.example).
 
@@ -131,7 +143,7 @@ WantedBy=multi-user.target
 Ограниченный NOPASSWD только для конкретных команд:
 
 ```text
-deploy ALL=NOPASSWD: /bin/systemctl restart cvetochniy21.service, /bin/systemctl status cvetochniy21.service
+deploy ALL=NOPASSWD: /bin/systemctl restart cvetochniy21.service, /bin/systemctl status cvetochniy21.service, /bin/systemctl restart cvet21.service, /bin/systemctl status cvet21.service
 ```
 
 Файл в `/etc/sudoers.d/` создаётся только вручную администратором (`visudo`). Workflow этот файл **не трогает**.
@@ -152,7 +164,7 @@ deploy ALL=NOPASSWD: /bin/systemctl restart cvetochniy21.service, /bin/systemctl
 4. Перенести SQLite по [database-migration-ru-to-new-server.md](./database-migration-ru-to-new-server.md).
 5. Перенести **`backend/data/promotion-uploads/`**.
 6. Создать на сервере production **`.env`** (включая `APP_PUBLIC_URL` или `BASE_URL`, `F21_SQLITE_PATH`, ключи интеграций).
-7. Настроить **systemd** (`cvetochniy21.service` / `f21.service` или согласовать имя с разделом E) **или** **pm2** (`cvetochniy21` / `f21`).
+7. Настроить **systemd** (`cvetochniy21.service` / **`cvet21.service`** / `f21.service`, см. раздел E) **или** **pm2** (`cvetochniy21` / **`cvet21`** / `f21`).
 8. Добавить в GitHub пять Repository Secrets.
 9. Запустить workflow вручную: **Actions** → **Deploy via SSH** → **Run workflow**, либо сделать push в `main`.
 10. Проверить логи job, работу сайта, checkout, админку, Telegram, Т-Банк ([production-smoke-test-checklist.md](./production-smoke-test-checklist.md)).
