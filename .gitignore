@@ -5,3 +5,11 @@ backend/database.sqlite
 .idea/
 backend/data/promotion-uploads/
 .env
+.env.*
+!.env.example
+backups/
+*.dump
+*.sql
+*.sqlite.backup
+*.db.backup
+*.tar.gz
