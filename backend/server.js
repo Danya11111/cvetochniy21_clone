@@ -866,9 +866,13 @@ function logStartupWiring() {
         BROADCAST_TOPIC_TEST_MODE: C.BROADCAST_TOPIC_TEST_MODE
     };
     const threads = {
-        broadcastTopicId: Number(C.TELEGRAM_BROADCAST_TOPIC_THREAD_ID || 0),
         ordersTopicId: Number(C.TELEGRAM_ORDERS_NOTIFY_THREAD_ID || 0),
-        supportTopicId: Number(C.TELEGRAM_SUPPORT_NOTIFY_THREAD_ID || 0)
+        supportTopicId: Number(C.TELEGRAM_SUPPORT_NOTIFY_THREAD_ID || 0),
+        broadcastTopicId: Number(C.TELEGRAM_BROADCAST_TOPIC_THREAD_ID || 0),
+        errorsRoutingTopicId: Number(C.TELEGRAM_ERRORS_NOTIFY_THREAD_ID || 0),
+        abandonedCartsForumTopicId: Number(C.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0),
+        abandonedCartTelegramNotificationsEnabled: !!C.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED,
+        abandonedCartsEnabled: !!C.ABANDONED_CARTS_ENABLED
     };
     console.log('[Startup] Telegram Bot API HTTP path:', describeProxyUrlForLogs(C.TELEGRAM_PROXY_URL));
     console.log('[Startup] F21 operational wiring (effective flags + thread ids, без секретов):', JSON.stringify({ flags, threads }, null, 0));
@@ -891,14 +895,14 @@ function logStartupWiring() {
             '[Startup] SUPPORT_RELAY_ENABLED=true, но TELEGRAM_SUPPORT_NOTIFY_THREAD_ID=0 — уведомления в тему поддержки не отправляются.'
         );
     }
-    if (C.ABANDONED_CARTS_ENABLED && !(Number(C.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0) > 0)) {
-        console.warn(
-            '[Startup] ABANDONED_CARTS_ENABLED=true, но TELEGRAM_TOPIC_ABANDONED_CARTS_ID=0 — уведомления о брошенных корзинах в Telegram не отправляются.'
-        );
-    }
     if (!C.TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED) {
         console.warn(
             '[Startup] TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED=false — исходящие HTTPS к api.telegram.org отключены (уведомления/топики/рассылки через бота не уходят). Проверка подписи Web App initData остаётся локальной.'
+        );
+    }
+    if (C.ABANDONED_CARTS_ENABLED && !C.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED) {
+        console.log(
+            '[Startup] Abandoned carts: серверный трекинг включён; Telegram topic notifications выключены (см. threads.abandonedCartTelegramNotificationsEnabled). Полный список — только в админке.'
         );
     }
     if (!C.ADMIN_UI_ENABLED && !C.ADMIN_MINIAPP_EMBED_ENABLED) {

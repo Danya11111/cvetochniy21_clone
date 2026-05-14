@@ -65,7 +65,7 @@ const DASH_METRIC_HELP = {
     },
     abandoned_carts: {
         title: 'Брошенные корзины',
-        body: 'Снимки корзин до оформления заказа на сервере (не цены для оплаты). Короткая строка — сводка статусов «активные» (включая оформление), «брошено», «уведомлено», «восстановлено». Тапните строку, чтобы открыть список.'
+        body: 'Снимки корзин до заказа (total_amount хранится в копейках). На дашборде показана сумма по проблемным статусам (active/checkout_started/abandoned/notified). Детали — по раскрытию; телеграм-уведомления в тему включаются только если задана TELEGRAM_TOPIC_ABANDONED_CARTS_ID и включён режим отправки.'
     },
     top_products: {
         title: 'Топ популярных товаров',
@@ -140,6 +140,8 @@ const state = {
     supportClientTelegramId: '',
     analyticsPeriod: '7d',
     broadcastsFilter: 'all',
+    /** Сворачивание детальной сводки на дашборде v2 для «Брошенные корзины». */
+    dashboardAbandonedExpanded: false,
     clientsQ: '',
     clientsV2NewQ: '',
     clientsV2AllQ: '',
@@ -203,6 +205,7 @@ function loadUiState() {
             'supportClientTelegramId',
             'analyticsPeriod',
             'broadcastsFilter',
+            'dashboardAbandonedExpanded',
             'clientsQ',
             'clientsV2NewQ',
             'clientsV2AllQ',
@@ -242,6 +245,7 @@ function saveUiState() {
             supportClientTelegramId: state.supportClientTelegramId,
             analyticsPeriod: state.analyticsPeriod,
             broadcastsFilter: state.broadcastsFilter,
+            dashboardAbandonedExpanded: state.dashboardAbandonedExpanded,
             clientsQ: state.clientsQ,
             clientsV2NewQ: state.clientsV2NewQ,
             clientsV2AllQ: state.clientsV2AllQ,
@@ -302,6 +306,13 @@ function formatKopecksAsRub(kopecks) {
     const whole = minor % MONEY_MINOR_PER_MAJOR === 0;
     const n = whole ? Math.round(rub) : Math.round(rub * 100) / 100;
     return `${n.toLocaleString('ru-RU', whole ? { maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
+}
+
+/** Сводка проблемных брошенных корзин: целые рубли по полю problemTotalKopecks (`/api/admin/dashboard-v2`). */
+function formatRubWholeFromKopecks(kopecks) {
+    const minor = Math.round(Number(kopecks || 0));
+    const rub = (Number.isFinite(minor) ? minor : 0) / MONEY_MINOR_PER_MAJOR;
+    return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(rub);
 }
 
 function formatNum(value) {
@@ -1292,11 +1303,10 @@ async function renderDashboardV2Screen() {
     const speedText = speedIsNum ? `${Math.round(speedMinutes)} мин${speedSuffix}` : 'нет данных';
 
     const ac = m.abandonedCarts && typeof m.abandonedCarts === 'object' ? m.abandonedCarts : null;
-    const abandonedLineHtml = ac
-        ? `акт. ${formatNum(ac.active || 0)} · брош. ${formatNum(ac.abandoned || 0)} · увед. ${formatNum(
-              ac.notified || 0
-          )} · восст. ${formatNum(ac.recovered || 0)} · конв. ${dashboardFormatPct(ac.recoveryVsAbandonPct || 0)}%`
-        : 'нет данных';
+    const acExpanded = !!state.dashboardAbandonedExpanded;
+    const problemKProbe = ac != null ? Number(ac.problemTotalKopecks) : NaN;
+    const abandonedMainRub = ac != null ? formatRubWholeFromKopecks(Number.isFinite(problemKProbe) ? problemKProbe : 0) : 'нет данных';
+    const abandonedSk = ac && typeof ac.sumKopecksByStatus === 'object' ? ac.sumKopecksByStatus : null;
 
     /*
      * Proxy CR: paid_orders_count / orders_count · 100 за период (не конверсия «визит → покупка»).
@@ -1349,9 +1359,71 @@ async function renderDashboardV2Screen() {
         ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn" role="alert">${esc(state.dashboardRangeUiError)}</div>`
         : '';
 
-    const revenueEscaped = esc(formatKopecksAsRub(m.revenueKopecks));
-
-    const dashSources = Array.isArray(payload.sources) ? payload.sources : [];
+    const abandonedBlock = (() => {
+        if (!ac) {
+            return `
+                <button type="button" class="dashboard-v2__dash-row dashboard-v2__abandoned-row" data-action="dash-tip" data-tip-id="abandoned_carts" aria-label="Справка: брошенные корзины">
+                    <span class="dashboard-v2__abandoned-head-left">
+                        <span class="dashboard-v2__abandoned-title">${esc('Брошенные корзины')}</span>
+                    </span>
+                    <strong class="dashboard-v2__abandoned-value">${esc('нет данных')}</strong>
+                </button>`;
+        }
+        const nActiveOnly = Number(ac.activeOnly || 0);
+        const nCheckout = Number(ac.checkout_started || 0);
+        const nAbandoned = Number(ac.abandoned || 0);
+        const nNotified = Number(ac.notified || 0);
+        const nRecovered = Number(ac.recovered || 0);
+        const nProblemCarts = Number(ac.problemCartsCount || 0);
+        const conv = dashboardFormatPct(ac.recoveryVsAbandonPct || 0);
+        const sko = abandonedSk || {};
+        const sumAct = formatRubWholeFromKopecks(Number(sko.active || 0));
+        const sumCo = formatRubWholeFromKopecks(Number(sko.checkout_started || 0));
+        const sumAb = formatRubWholeFromKopecks(Number(sko.abandoned || 0));
+        const sumNo = formatRubWholeFromKopecks(Number(sko.notified || 0));
+        const errs = Array.isArray(ac.problemLastErrors) ? ac.problemLastErrors : [];
+        const errBlock =
+            acExpanded && errs.length
+                ? `<ul class="dashboard-v2__abandoned-errors">${errs
+                      .map((e) => `<li class="dashboard-v2__abandoned-error-item">${esc(String(e))}</li>`)
+                      .join('')}</ul>`
+                : '';
+        const chev = acExpanded ? '▾' : '▸';
+        return `
+            <div class="dashboard-v2__abandoned-wrap">
+                <div class="dashboard-v2__abandoned-head">
+                    <button
+                        type="button"
+                        class="dashboard-v2__abandoned-toggle"
+                        data-action="dashboard-toggle-abandoned-details"
+                        aria-expanded="${acExpanded ? 'true' : 'false'}"
+                        aria-label="Брошенные корзины: раскрыть или свернуть детали"
+                    >
+                        <span class="dashboard-v2__abandoned-head-left">
+                            <span class="dashboard-v2__abandoned-chevron" aria-hidden="true">${chev}</span>
+                            <span class="dashboard-v2__abandoned-title">${esc('Брошенные корзины')}</span>
+                        </span>
+                        <strong class="dashboard-v2__abandoned-value">${esc(abandonedMainRub)}</strong>
+                    </button>
+                    <button type="button" class="dashboard-v2__abandoned-help-btn" data-action="dash-tip" data-tip-id="abandoned_carts" aria-label="Справка: брошенные корзины">?</button>
+                </div>
+                <div class="dashboard-v2__abandoned-details${acExpanded ? '' : ' dashboard-v2__abandoned-details--collapsed'}">
+                    <div class="dashboard-v2__abandoned-kv">
+                        <div>Активные: <strong>${esc(formatNum(nActiveOnly))}</strong> · ${esc(sumAct)}</div>
+                        <div>Оформление: <strong>${esc(formatNum(nCheckout))}</strong> · ${esc(sumCo)}</div>
+                        <div>Брошенные: <strong>${esc(formatNum(nAbandoned))}</strong> · ${esc(sumAb)}</div>
+                        <div>Уведомлённые: <strong>${esc(formatNum(nNotified))}</strong> · ${esc(sumNo)}</div>
+                        <div>Восстановленные: <strong>${esc(formatNum(nRecovered))}</strong></div>
+                        <div>Конверсия: <strong>${esc(conv)}%</strong></div>
+                        <div>Корзин (проблемные статусы): <strong>${esc(formatNum(nProblemCarts))}</strong></div>
+                    </div>
+                    ${errBlock}
+                    <button type="button" class="dashboard-v2__dash-row dashboard-v2__abandoned-open" data-action="open-abandoned-carts" aria-label="Открыть список брошенных корзин">
+                        <span>${esc('Открыть список')}</span><strong aria-hidden="true">→</strong>
+                    </button>
+                </div>
+            </div>`;
+    })();
     const sourcesBlockInner =
         dashSources.length === 0
             ? `<div class="dashboard-v2__dash-row dashboard-v2__dash-row--single"><strong>нет данных</strong></div>`
@@ -1435,9 +1507,7 @@ async function renderDashboardV2Screen() {
             <h3 class="dashboard-v2__section-title">Сервис и качество</h3>
             <div class="dashboard-v2__stack">
                 ${renderDashMetricRow('Скорость ответа', esc(speedText), speedDanger, 'response_time')}
-                <button type="button" class="dashboard-v2__dash-row" data-action="open-abandoned-carts" aria-label="Брошенные корзины, открыть список">
-                    <span>${esc('Брошенные корзины')}</span><strong>${ac ? esc(abandonedLineHtml) : esc('нет данных')}</strong>
-                </button>
+                ${abandonedBlock}
             </div>
 
             <h3 class="dashboard-v2__section-title">Аналитика</h3>
@@ -3692,6 +3762,11 @@ async function handleAction(action, value, eventTarget) {
         openDashboardMetricHelp(id);
         return;
     }
+    if (action === 'dashboard-toggle-abandoned-details') {
+        state.dashboardAbandonedExpanded = !state.dashboardAbandonedExpanded;
+        await renderApp();
+        return;
+    }
     if (action === 'dashboard-preset-today') {
         const today = dashYmdFromDate(new Date());
         state.dashboardDateFrom = today;
@@ -3777,7 +3852,7 @@ async function handleAction(action, value, eventTarget) {
         openConfirmationSheet(
             {
                 title: 'Отправить уведомление в Telegram?',
-                message: `Повторная отправка в тему брошенных корзин для #${id}. Учитывайте лимиты Telegram.`,
+                message: `Попытка админ-push для корзины #${id}. Сработает только если включены Telegram‑уведомления и задан forum topic.`,
                 severity: 'normal',
                 confirm_label: 'Отправить',
                 cancel_label: 'Закрыть'

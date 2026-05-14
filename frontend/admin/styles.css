@@ -1782,6 +1782,116 @@ button.dashboard-v2__dash-row {
     justify-content: center;
 }
 
+.dashboard-v2__abandoned-wrap {
+    border-bottom: 1px solid var(--line);
+}
+
+.dashboard-v2__abandoned-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: stretch;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-3);
+}
+
+.dashboard-v2__abandoned-toggle {
+    border: 0;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    min-height: 42px;
+    padding: 0;
+    text-align: left;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dashboard-v2__abandoned-toggle:active {
+    filter: brightness(0.98);
+}
+
+.dashboard-v2__abandoned-head-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.dashboard-v2__abandoned-chevron {
+    width: 16px;
+    display: inline-flex;
+    justify-content: center;
+    color: var(--text-soft);
+    font-weight: 800;
+}
+
+.dashboard-v2__abandoned-title {
+    font-weight: 600;
+    color: var(--text-soft);
+}
+
+.dashboard-v2__abandoned-value {
+    font-weight: 700;
+    text-align: right;
+    color: var(--text-main);
+    flex-shrink: 0;
+}
+
+.dashboard-v2__abandoned-help-btn {
+    width: 40px;
+    min-height: 42px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--brand-400);
+    background: var(--surface-1);
+    color: var(--brand-700);
+    font: inherit;
+    font-weight: 800;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.dashboard-v2__abandoned-help-btn:active {
+    filter: brightness(0.96);
+}
+
+.dashboard-v2__abandoned-details {
+    padding: 0 var(--space-3) var(--space-3);
+}
+
+.dashboard-v2__abandoned-details--collapsed {
+    display: none;
+}
+
+.dashboard-v2__abandoned-kv {
+    display: grid;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text-soft);
+}
+
+.dashboard-v2__abandoned-kv strong {
+    color: var(--text-main);
+}
+
+.dashboard-v2__abandoned-errors {
+    margin: 10px 0 6px;
+    padding-left: 18px;
+}
+
+.dashboard-v2__abandoned-error-item {
+    margin: 4px 0;
+    opacity: 0.9;
+}
+
+button.dashboard-v2__abandoned-open {
+    border-top: 1px solid var(--line);
+}
+
 .dashboard-v2__card {
     background: var(--surface-1);
     border-radius: var(--radius-md);

@@ -55,6 +55,7 @@ async function createSchema(db) {
 }
 
 function makeService(db, overrides = {}) {
+    /** @type {Record<string, any>} */
     const cfg = {
         ABANDONED_CARTS_ENABLED: true,
         ABANDONED_CART_AFTER_MINUTES: 1,
@@ -66,6 +67,10 @@ function makeService(db, overrides = {}) {
         TELEGRAM_TOPIC_ABANDONED_CARTS_ID: 9,
         ...overrides
     };
+    if (!Object.prototype.hasOwnProperty.call(overrides, 'ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED')) {
+        cfg.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED =
+            Number(cfg.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0) > 0;
+    }
     const telegramClient = {
         async sendMessage() {
             return { ok: true, data: { message_id: 1 } };
@@ -183,6 +188,67 @@ function makeService(db, overrides = {}) {
         assert.ok(n1 && n1.ok);
         assert.strictEqual(n2 && n2.ok, false);
         assert.strictEqual(String(n2 && n2.error || ''), 'NOTIFY_LIMIT');
+
+        /** Telegram-topic уведомления выключены: scanner не ставит notified/last_error */
+        const dbTeleOff = new sqlite3.Database(':memory:');
+        await createSchema(dbTeleOff);
+        const svcTeleOff = makeService(dbTeleOff, { TELEGRAM_TOPIC_ABANDONED_CARTS_ID: 0 });
+        const keyT = 'b7011111-1111-4111-8111-111111111111';
+        await svcTeleOff.sync({
+            cart_key: keyT,
+            items: [{ name: 'Z', quantity: 1, price: 10 }],
+            total_kopecks: 1000
+        });
+        await runSql(dbTeleOff, `UPDATE abandoned_carts SET last_seen_at = ? WHERE cart_key = ?`, [
+            new Date(Date.now() - 120_000).toISOString(),
+            keyT
+        ]);
+        const scanTele = await svcTeleOff.scanAndProcess(new Date());
+        assert.ok(scanTele && scanTele.abandonedN >= 1);
+        const rowT = await getRow(dbTeleOff, `SELECT status, notification_count, last_error FROM abandoned_carts WHERE cart_key = ?`, [keyT]);
+        assert.strictEqual(String(rowT.status), 'abandoned');
+        assert.strictEqual(Number(rowT.notification_count || 0), 0);
+        assert.ok(rowT.last_error == null);
+
+        /** Dashboard snapshot: суммы только для active/checkout_started/abandoned/notified */
+        const dbDash = new sqlite3.Database(':memory:');
+        await createSchema(dbDash);
+        const svcDash = makeService(dbDash, { TELEGRAM_TOPIC_ABANDONED_CARTS_ID: 0 });
+        const ka = 'ba011111-1111-4111-8111-111111111111';
+        const kb = 'ba021111-1111-4111-8111-111111111111';
+        const kc = 'ba031111-1111-4111-8111-111111111111';
+        const kd = 'ba041111-1111-4111-8111-111111111111';
+        await svcDash.sync({
+            cart_key: ka,
+            items: [{ name: 'Aa', quantity: 1, price: 100 }],
+            total_kopecks: 10000
+        });
+        await svcDash.sync({
+            cart_key: kb,
+            items: [{ name: 'Bb', quantity: 1, price: 50 }],
+            total_kopecks: 5000
+        });
+        await svcDash.sync({
+            cart_key: kc,
+            items: [{ name: 'Cc', quantity: 1, price: 200 }],
+            total_kopecks: 20000
+        });
+        await svcDash.markRecovered({ cart_key: kc, order_id: 9 });
+        await svcDash.sync({
+            cart_key: kd,
+            items: [{ name: 'Dd', quantity: 1, price: 10 }],
+            total_kopecks: 1000
+        });
+        const expiredTarget = await getRow(dbDash, `SELECT id FROM abandoned_carts WHERE cart_key = ?`, [kd]);
+        await svcDash.adminMarkExpired(Number(expiredTarget.id));
+        await runSql(dbDash, `UPDATE abandoned_carts SET last_error = ? WHERE cart_key = ?`, ['boom', ka]);
+
+        const dashSnap = await fetchAbandonedCartDashboardSnapshot(dbDash);
+        assert.strictEqual(Number(dashSnap.problemTotalKopecks || 0), 15000);
+        assert.strictEqual(Number(dashSnap.problemCartsCount || 0), 2);
+        assert.strictEqual(Number(dashSnap.sumKopecksByStatus && dashSnap.sumKopecksByStatus.active || 0), 15000);
+        assert.ok(Array.isArray(dashSnap.problemLastErrors));
+        assert.ok(dashSnap.problemLastErrors.some((x) => String(x).includes('boom')));
 
         console.log('[abandoned-cart-service.test] PASS');
     } finally {

@@ -112,6 +112,7 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
 
     const forumChatId = String(config.TELEGRAM_FORUM_GROUP_ID || '').trim();
     const abandonedThreadId = Number(config.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0);
+    const telegramNotifyEnabled = !!config.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED;
 
     function parseIsoMs(iso) {
         const t = Date.parse(String(iso || ''));
@@ -373,14 +374,11 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
 
     /** Plain text only (avoid Markdown parse failures in forum topics). */
     async function sendTelegramNotify(row) {
-        if (!forumChatId || !abandonedThreadId) {
-            if (enabled) {
-                logger.warn('[AbandonedCart] telegram_skip_no_topic', {
-                    hasChat: !!forumChatId,
-                    threadId: abandonedThreadId
-                });
-            }
-            return { ok: false, errorCode: 'NO_TOPIC' };
+        if (!telegramNotifyEnabled) {
+            return { ok: true, skipped: true, reason: 'TELEGRAM_DISABLED' };
+        }
+        if (!forumChatId || !(abandonedThreadId > 0)) {
+            return { ok: true, skipped: true, reason: 'NO_TOPIC' };
         }
         const text =
             `🛒 Брошенная корзина #${row.id}\n` +
@@ -509,45 +507,48 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
             [maxNotifications]
         );
 
-        for (const row of notifyRows) {
-            const cnt = Number(row.notification_count || 0);
-            if (!(cnt < maxNotifications)) continue;
+        if (telegramNotifyEnabled) {
+            for (const row of notifyRows) {
+                const cnt = Number(row.notification_count || 0);
+                if (!(cnt < maxNotifications)) continue;
 
-            const meta = safeMetaParse(row.metadata_json);
-            let abandonedAtMs = parseIsoMs(meta.abandonedAt);
-            if (abandonedAtMs == null) abandonedAtMs = parseIsoMs(row.updated_at);
+                const meta = safeMetaParse(row.metadata_json);
+                let abandonedAtMs = parseIsoMs(meta.abandonedAt);
+                if (abandonedAtMs == null) abandonedAtMs = parseIsoMs(row.updated_at);
 
-            const lastSeenMs = parseIsoMs(row.last_seen_at);
-            const idleBaseline = abandonedAtMs != null ? abandonedAtMs : lastSeenMs != null ? lastSeenMs : null;
-            if (idleBaseline == null) continue;
+                const lastSeenMs = parseIsoMs(row.last_seen_at);
+                const idleBaseline = abandonedAtMs != null ? abandonedAtMs : lastSeenMs != null ? lastSeenMs : null;
+                if (idleBaseline == null) continue;
 
-            const lastNotMs = parseIsoMs(row.last_notified_at);
+                const lastNotMs = parseIsoMs(row.last_notified_at);
 
-            let maySend = false;
-            if (cnt === 0) {
-                maySend = nowMs >= idleBaseline + notifyLagMs;
-            } else if (lastNotMs != null) {
-                maySend = nowMs >= lastNotMs + repeatMs;
+                let maySend = false;
+                if (cnt === 0) {
+                    maySend = nowMs >= idleBaseline + notifyLagMs;
+                } else if (lastNotMs != null) {
+                    maySend = nowMs >= lastNotMs + repeatMs;
+                }
+
+                if (!maySend) continue;
+
+                const tg = await sendTelegramNotify(row);
+                if (tg && tg.skipped) continue;
+                const isoN = nowIso();
+                const firstAt = cnt === 0 ? isoN : null;
+                const nextCount = cnt + 1;
+                const nextAt =
+                    nextCount < maxNotifications && repeatMs > 0 ? new Date(nowMs + repeatMs).toISOString() : null;
+                await bumpNotificationRow(row.id, {
+                    count: nextCount,
+                    firstAt,
+                    lastAt: isoN,
+                    nextAt,
+                    status: 'notified',
+                    err: tg && tg.ok ? null : String(tg?.message || tg?.errorCode || 'SEND_FAILED').slice(0, 900),
+                    meta: safeMetaParse(row.metadata_json)
+                });
+                notifiedN++;
             }
-
-            if (!maySend) continue;
-
-            const tg = await sendTelegramNotify(row);
-            const isoN = nowIso();
-            const firstAt = cnt === 0 ? isoN : null;
-            const nextCount = cnt + 1;
-            const nextAt =
-                nextCount < maxNotifications && repeatMs > 0 ? new Date(nowMs + repeatMs).toISOString() : null;
-            await bumpNotificationRow(row.id, {
-                count: nextCount,
-                firstAt,
-                lastAt: isoN,
-                nextAt,
-                status: 'notified',
-                err: tg && tg.ok ? null : String(tg?.message || tg?.errorCode || 'SEND_FAILED').slice(0, 900),
-                meta: safeMetaParse(row.metadata_json)
-            });
-            notifiedN++;
         }
 
         if (expiredN || abandonedN || notifiedN) {
@@ -565,7 +566,12 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
         if (st === 'recovered' || st === 'cleared' || st === 'expired') return { ok: false, error: 'BAD_STATUS' };
         if (Number(row.notification_count || 0) >= maxNotifications) return { ok: false, error: 'NOTIFY_LIMIT' };
 
+        if (!telegramNotifyEnabled) {
+            return { ok: false, error: 'TELEGRAM_NOTIFICATIONS_DISABLED' };
+        }
+
         const tg = await sendTelegramNotify(row);
+        if (tg && tg.skipped) return { ok: false, error: 'TELEGRAM_NOTIFICATIONS_SKIP' };
         const isoN = nowIso();
         const cnt = Number(row.notification_count || 0) + 1;
         await bumpNotificationRow(row.id, {
@@ -638,19 +644,54 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
  * @param {import('sqlite3').Database} database
  */
 async function fetchAbandonedCartDashboardSnapshot(database) {
-    const rows = await all(database, `SELECT status, COUNT(*) AS c FROM abandoned_carts GROUP BY status`);
+    const rows = await all(
+        database,
+        `SELECT status, COUNT(*) AS c, COALESCE(SUM(total_amount), 0) AS sum_kopecks FROM abandoned_carts GROUP BY status`
+    );
     /** @type {Record<string, number>} */
     const by = {};
+    /** @type {Record<string, number>} */
+    const sumKopecksByStatusKey = {};
     for (const r of rows || []) {
-        by[String(r.status)] = Math.round(Number(r.c || 0));
+        const st = String(r.status);
+        by[st] = Math.round(Number(r.c || 0));
+        sumKopecksByStatusKey[st] = Math.round(Number(r.sum_kopecks || 0));
     }
     const recovered = Number(by.recovered || 0);
     const abandoned = Number(by.abandoned || 0);
     const notified = Number(by.notified || 0);
     const denom = Math.max(1, abandoned + notified + recovered);
     const recoveryVsAbandonPct = Math.round((recovered / denom) * 1000) / 10;
+
+    const problemStatuses = ['active', 'checkout_started', 'abandoned', 'notified'];
+    let problemTotalKopecks = 0;
+    let problemCartsCount = 0;
+    for (const st of problemStatuses) {
+        problemTotalKopecks += Number(sumKopecksByStatusKey[st] || 0);
+        problemCartsCount += Number(by[st] || 0);
+    }
+
+    let problemLastErrors = [];
+    try {
+        const errRows = await all(
+            database,
+            `SELECT DISTINCT TRIM(last_error) AS err
+             FROM abandoned_carts
+             WHERE status IN ('active','checkout_started','abandoned','notified')
+               AND last_error IS NOT NULL
+               AND LENGTH(TRIM(last_error)) > 0
+             LIMIT 5`
+        );
+        problemLastErrors = (errRows || [])
+            .map((r) => String(r.err || '').trim().slice(0, 400))
+            .filter(Boolean);
+    } catch (_) {
+        problemLastErrors = [];
+    }
+
     return {
         active: Number(by.active || 0) + Number(by.checkout_started || 0),
+        activeOnly: Number(by.active || 0),
         checkout_started: Number(by.checkout_started || 0),
         abandoned,
         notified,
@@ -658,7 +699,16 @@ async function fetchAbandonedCartDashboardSnapshot(database) {
         cleared: Number(by.cleared || 0),
         expired: Number(by.expired || 0),
         recoveryVsAbandonPct,
-        totalsByStatus: by
+        totalsByStatus: by,
+        problemTotalKopecks,
+        problemCartsCount,
+        sumKopecksByStatus: {
+            active: Number(sumKopecksByStatusKey.active || 0),
+            checkout_started: Number(sumKopecksByStatusKey.checkout_started || 0),
+            abandoned: Number(sumKopecksByStatusKey.abandoned || 0),
+            notified: Number(sumKopecksByStatusKey.notified || 0)
+        },
+        problemLastErrors
     };
 }
 

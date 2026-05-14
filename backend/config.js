@@ -155,6 +155,7 @@ function resolveThreadFromEnv(keys, fallbackNum) {
 if (0) {
     void process.env.APP_PUBLIC_URL;
     void process.env.ABANDONED_CARTS_ENABLED;
+    void process.env.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED;
     void process.env.ABANDONED_CART_AFTER_MINUTES;
     void process.env.ABANDONED_CART_NOTIFY_AFTER_MINUTES;
     void process.env.ABANDONED_CART_REPEAT_NOTIFY_HOURS;
@@ -163,6 +164,8 @@ if (0) {
     void process.env.ABANDONED_CART_SCAN_INTERVAL_MINUTES;
     void process.env.TELEGRAM_SUPERGROUP_ID;
     void process.env.TELEGRAM_TOPIC_ORDERS_ID;
+    void process.env.TELEGRAM_TOPIC_SUPPORT_ID;
+    void process.env.TELEGRAM_TOPIC_BROADCASTS_ID;
     void process.env.TELEGRAM_TOPIC_ERRORS_ID;
     void process.env.TELEGRAM_TOPIC_ABANDONED_CARTS_ID;
     void process.env.TELEGRAM_BROADCAST_TOPIC_CHAT_ID;
@@ -178,6 +181,31 @@ if (0) {
 }
 
 const RESOLVED_TELEGRAM_FORUM_GROUP_ID = resolveTelegramForumGroupId();
+
+/**
+ * Abandoned-cart topic optional: пустой / не задан → 0 (Telegram-topic уведомления выключаются без ошибки).
+ */
+const RESOLVED_TELEGRAM_TOPIC_ABANDONED_CARTS_ID = envInt('TELEGRAM_TOPIC_ABANDONED_CARTS_ID', 0);
+
+/**
+ * Явное env переключает независимо от темы.
+ * Если env не задан: телеграм‑уведомления включены только при thread_id > 0.
+ */
+function resolveAbandonedCartTelegramNotificationsEnabled(topicThreadId) {
+    const tid = Number(topicThreadId || 0);
+    const raw = process.env.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED;
+    if (raw === undefined || raw === null || String(raw).trim() === '') return tid > 0;
+    return envBool('ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED', false);
+}
+
+const RESOLVED_TELEGRAM_SUPPORT_TOPIC_THREAD_ID = resolveThreadFromEnv(
+    ['TELEGRAM_TOPIC_SUPPORT_ID', 'TELEGRAM_SUPPORT_NOTIFY_THREAD_ID', 'TELEGRAM_SUPPORT_THREAD_ID'],
+    6
+);
+const RESOLVED_TELEGRAM_ERRORS_ROUTING_THREAD_ID =
+    String(process.env.TELEGRAM_TOPIC_ERRORS_ID || '').trim() !== ''
+        ? envInt('TELEGRAM_TOPIC_ERRORS_ID', RESOLVED_TELEGRAM_SUPPORT_TOPIC_THREAD_ID)
+        : RESOLVED_TELEGRAM_SUPPORT_TOPIC_THREAD_ID;
 
 function resolveTelegramPerPurposeChatId(specificKey) {
     if (String(process.env[specificKey] || '').trim() !== '') return String(process.env[specificKey]).trim();
@@ -273,26 +301,31 @@ module.exports = {
     ORDERS_TOPIC_NOTIFICATIONS_ENABLED: envBool('ORDERS_TOPIC_NOTIFICATIONS_ENABLED', true),
     CLIENT_TOPIC_REPLY_ENABLED: envBool('CLIENT_TOPIC_REPLY_ENABLED', true),
 
-    // Темы форума: chat_id = TELEGRAM_FORUM_GROUP_ID; thread_id из ссылки t.me/c/…/THREAD
-    // Алиасы thread: TELEGRAM_BROADCASTS_THREAD_ID, TELEGRAM_ORDERS_THREAD_ID, TELEGRAM_SUPPORT_THREAD_ID
+    // Темы форума: chat_id = TELEGRAM_FORUM_GROUP_ID (или TELEGRAM_SUPERGROUP_ID); thread_id канонических ключей TELEGRAM_TOPIC_*.
+    // Fallback thread_id: см. TELEGRAM_*_NOTIFY_THREAD_ID / TELEGRAM_*_THREAD_ID (ориентиры см. docs/telegram-forum-topics-ru.md).
     TELEGRAM_BROADCAST_TOPIC_CHAT_ID: resolveTelegramPerPurposeChatId('TELEGRAM_BROADCAST_TOPIC_CHAT_ID'),
-    TELEGRAM_BROADCAST_TOPIC_THREAD_ID: resolveThreadId(
-        'TELEGRAM_BROADCAST_TOPIC_THREAD_ID',
-        'TELEGRAM_BROADCASTS_THREAD_ID',
+    TELEGRAM_BROADCAST_TOPIC_THREAD_ID: resolveThreadFromEnv(
+        ['TELEGRAM_TOPIC_BROADCASTS_ID', 'TELEGRAM_BROADCAST_TOPIC_THREAD_ID', 'TELEGRAM_BROADCASTS_THREAD_ID'],
         4
     ),
     TELEGRAM_SUPPORT_NOTIFY_CHAT_ID: resolveTelegramPerPurposeChatId('TELEGRAM_SUPPORT_NOTIFY_CHAT_ID'),
-    TELEGRAM_SUPPORT_NOTIFY_THREAD_ID: resolveThreadFromEnv(
-        ['TELEGRAM_TOPIC_ERRORS_ID', 'TELEGRAM_SUPPORT_NOTIFY_THREAD_ID', 'TELEGRAM_SUPPORT_THREAD_ID'],
-        6
-    ),
+    TELEGRAM_SUPPORT_NOTIFY_THREAD_ID: RESOLVED_TELEGRAM_SUPPORT_TOPIC_THREAD_ID,
+    /** Если задан TELEGRAM_TOPIC_ERRORS_ID — отдельная тема ошибок; иначе те же thread_id что и поддержка. */
+    TELEGRAM_ERRORS_NOTIFY_THREAD_ID: RESOLVED_TELEGRAM_ERRORS_ROUTING_THREAD_ID,
     TELEGRAM_ORDERS_NOTIFY_CHAT_ID: resolveTelegramPerPurposeChatId('TELEGRAM_ORDERS_NOTIFY_CHAT_ID'),
     TELEGRAM_ORDERS_NOTIFY_THREAD_ID: resolveThreadFromEnv(
         ['TELEGRAM_TOPIC_ORDERS_ID', 'TELEGRAM_ORDERS_NOTIFY_THREAD_ID', 'TELEGRAM_ORDERS_THREAD_ID'],
         2
     ),
-    /** Зарезервировано под сервисные уведомления (пока не используется в коде отправки). */
-    TELEGRAM_TOPIC_ABANDONED_CARTS_ID: envInt('TELEGRAM_TOPIC_ABANDONED_CARTS_ID', 0),
+    /** Опционально: отдельная тема «брошенные корзины» (0/пусто = без Telegram-уведомлений, только БД+админка). */
+    TELEGRAM_TOPIC_ABANDONED_CARTS_ID: RESOLVED_TELEGRAM_TOPIC_ABANDONED_CARTS_ID,
+    /**
+     * Опционально: явный выключатель Telegram-уведомлений по брошенным корзинам.
+     * Если env не задан — по умолчанию true только при ненулевом TELEGRAM_TOPIC_ABANDONED_CARTS_ID.
+     */
+    ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED: resolveAbandonedCartTelegramNotificationsEnabled(
+        RESOLVED_TELEGRAM_TOPIC_ABANDONED_CARTS_ID
+    ),
 
     ABANDONED_CARTS_ENABLED: envBool('ABANDONED_CARTS_ENABLED', false),
     ABANDONED_CART_AFTER_MINUTES: envInt('ABANDONED_CART_AFTER_MINUTES', 30),
