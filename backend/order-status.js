@@ -9,8 +9,8 @@ const PAID_CONFIRMED = new Set(['PAID', 'COMPLETED', 'DELIVERED']);
 const PAYMENT_AWAIT = new Set(['PENDING_PAYMENT']);
 const PAYMENT_AUTHORIZED = new Set(['AUTHORIZED']);
 const PAYMENT_FAILED = new Set(['PAYMENT_FAILED']);
-/** legacy: ранее отмена оплаты мапилась в CANCELLED */
-const CANCELLED_LIKE = new Set(['CANCELLED', 'CANCELED', 'FAILED', 'ERROR']);
+/** Сырые коды исторических / неактуальных записей из старых интеграций (не платёжный контур приложения сейчас). */
+const LEGACY_INACTIVE_EXACT = new Set(['CANCELLED', 'CANCELED', 'FAILED', 'ERROR', 'REFUNDED', 'RETURNED']);
 
 function hasRecordedPayment(row) {
     return Math.round(Number(row && row.total_paid)) > 0;
@@ -20,6 +20,17 @@ function hasRecordedPayment(row) {
 function isPaidStatusString(status) {
     const u = String(status || '').trim().toUpperCase();
     return PAID_CONFIRMED.has(u);
+}
+
+/** Неактивируемый «архивный» статус строки заказа: не смешиваем с PAYMENT_FAILED и не добавляем сценариев отмены/возврата в продукт. */
+function isLegacyInactiveRawStatus(raw) {
+    const u = String(raw || '').trim().toUpperCase();
+    if (!u) return false;
+    if (PAYMENT_FAILED.has(u)) return false;
+    if (LEGACY_INACTIVE_EXACT.has(u)) return true;
+    if (u.includes('CANCEL')) return true;
+    if (u.includes('REFUND')) return true;
+    return false;
 }
 
 /** Оплачен по деньгам или по явному статусу (для админки, KPI, рисков). */
@@ -54,8 +65,13 @@ function deriveOrderAdminPresentation(row) {
             status_raw: raw
         };
     }
-    if (CANCELLED_LIKE.has(u) || u.includes('CANCEL')) {
-        return { status_code: 'cancelled', status_label: 'Отменён / ошибка', status_tone: 'alert', status_raw: raw };
+    if (isLegacyInactiveRawStatus(raw)) {
+        return {
+            status_code: 'legacy_inactive',
+            status_label: 'Архивный статус',
+            status_tone: 'info',
+            status_raw: raw
+        };
     }
 
     const display = (msHint || raw || 'В работе').trim();
@@ -70,10 +86,14 @@ function deriveOrderAdminPresentation(row) {
 
 const PAID_SQL = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
 const PAYMENT_FAILED_SQL = `UPPER(TRIM(COALESCE(o.status,''))) = 'PAYMENT_FAILED'`;
-/** Отменённые / legacy-ошибки — без PAYMENT_FAILED (отдельный фильтр `payment_failed`). */
-const CANCELLED_SQL = `(
-    UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR')
+/**
+ * История / «спящие» технические коды без отдельного продукта «отмена».
+ * Отдельно от PAYMENT_FAILED (клиент может повторить оплату — это не архив статусов отмен из старых правил).
+ */
+const LEGACY_INACTIVE_SQL = `(
+    UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR','REFUNDED','RETURNED')
     OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%'
+    OR UPPER(COALESCE(o.status,'')) LIKE '%REFUND%'
 )`;
 
 /**
@@ -92,16 +112,19 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
         if (c === 'authorized') {
             return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'AUTHORIZED'`, args: [] };
         }
-        if (c === 'cancelled') return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
+        // Намеренный «заглушечный» фильтр для старых клиентов: отмены/возвраты в приложении выключены, список не продвигаем.
+        if (c === 'cancelled' || c === 'legacy_inactive') {
+            return { clause: `WHERE ${LEGACY_INACTIVE_SQL}`, args: [] };
+        }
         if (c === 'payment_failed') {
             return { clause: `WHERE ${PAYMENT_FAILED_SQL}`, args: [] };
         }
         if (c === 'unpaid') {
-            return { clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL})`, args: [] };
+            return { clause: `WHERE NOT (${PAID_SQL}) AND NOT (${LEGACY_INACTIVE_SQL})`, args: [] };
         }
         if (c === 'fulfillment_external') {
             return {
-                clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL}) AND NOT (${PAYMENT_FAILED_SQL}) AND UPPER(TRIM(COALESCE(o.status,''))) NOT IN ('PENDING_PAYMENT','AUTHORIZED')`,
+                clause: `WHERE NOT (${PAID_SQL}) AND NOT (${LEGACY_INACTIVE_SQL}) AND NOT (${PAYMENT_FAILED_SQL}) AND UPPER(TRIM(COALESCE(o.status,''))) NOT IN ('PENDING_PAYMENT','AUTHORIZED')`,
                 args: []
             };
         }
@@ -120,8 +143,12 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
     if (lu === 'PAYMENT_FAILED') {
         return { clause: `WHERE ${PAYMENT_FAILED_SQL}`, args: [] };
     }
-    if (['CANCELLED', 'CANCELED', 'FAILED', 'ERROR'].includes(lu) || lu.includes('CANCEL')) {
-        return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
+    if (
+        ['CANCELLED', 'CANCELED', 'FAILED', 'ERROR', 'REFUNDED', 'RETURNED'].includes(lu) ||
+        lu.includes('CANCEL') ||
+        lu.includes('REFUND')
+    ) {
+        return { clause: `WHERE ${LEGACY_INACTIVE_SQL}`, args: [] };
     }
 
     return { clause: 'WHERE o.status = ?', args: [legacy] };
@@ -130,11 +157,13 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
 module.exports = {
     hasRecordedPayment,
     isPaidStatusString,
+    isLegacyInactiveRawStatus,
     isOrderPaidForOps,
     deriveOrderAdminPresentation,
     buildOrdersListWhereClause,
     PAID_CONFIRMED,
     PAYMENT_AWAIT,
     PAYMENT_AUTHORIZED,
-    PAYMENT_FAILED
+    PAYMENT_FAILED,
+    LEGACY_INACTIVE_SQL
 };

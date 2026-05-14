@@ -67,10 +67,6 @@ const DASH_METRIC_HELP = {
         title: 'Брошенные корзины',
         body: 'Снимки корзин до оформления заказа на сервере (не цены для оплаты). Короткая строка — сводка статусов «активные» (включая оформление), «брошено», «уведомлено», «восстановлено». Тапните строку, чтобы открыть список.'
     },
-    returns_cancel: {
-        title: 'Возвраты / отмены после оплаты',
-        body: 'Доля оплаченных заказов за период, которые завершились отменой или возвратом (по статусам в базе данных).'
-    },
     top_products: {
         title: 'Топ популярных товаров',
         body: 'Товары с наибольшим количеством продаж в оплаченных заказах за выбранный период (разбор позиций items_json).'
@@ -486,7 +482,7 @@ function playbookSteps(playbookId) {
         return [
             'Начните с клиентов с максимальным чеком',
             'Проверьте паузу и историю покупок',
-            'Запустите персональный сценарий возврата',
+            'Запустите персональный сценарий реактивации',
             'Передайте в follow-up маркетингу'
         ];
     }
@@ -502,7 +498,7 @@ function playbookRelatedActions(playbook) {
     const id = playbook && playbook.id ? playbook.id : '';
     if (id === 'vip_return' || id === 'high_value_recover') {
         return [
-            { label: 'К рассылкам для возврата', action: { screen: 'broadcasts', filters: { broadcastsFilter: 'repeatable' } } },
+            { label: 'К рассылкам для реактивации', action: { screen: 'broadcasts', filters: { broadcastsFilter: 'repeatable' } } },
             { label: 'Открыть клиентов', action: { screen: 'clients', filters: playbook.prefilled_filters || {} } }
         ];
     }
@@ -713,7 +709,7 @@ function openConfirmationSheet(config, onConfirm) {
         impact_summary: String(config && config.impact_summary || ''),
         severity: String(config && config.severity || 'normal'),
         confirm_label: String(config && config.confirm_label || 'Подтвердить'),
-        cancel_label: String(config && config.cancel_label || 'Отмена'),
+        cancel_label: String(config && config.cancel_label || 'Закрыть'),
         secondary_note: String(config && config.secondary_note || ''),
         count_summary: String(config && config.count_summary || ''),
         irreversible_warning: Boolean(config && config.irreversible_warning),
@@ -763,7 +759,7 @@ function renderConfirmationSheet() {
                 ${c.secondary_note ? `<div class="confirm-meta">${esc(c.secondary_note)}</div>` : ''}
                 ${c.irreversible_warning ? `<div class="confirm-warning">Действие может быть необратимым.</div>` : ''}
                 <div class="confirm-actions">
-                    <button class="secondary" data-action="confirm-cancel" ${c.loading ? 'disabled' : ''}>${esc(c.cancel_label || 'Отмена')}</button>
+                    <button class="secondary" data-action="confirm-cancel" ${c.loading ? 'disabled' : ''}>${esc(c.cancel_label || 'Закрыть')}</button>
                     <button class="${severity === 'destructive' ? 'destructive' : ''}" data-action="confirm-submit" ${c.loading ? 'disabled' : ''}>
                         ${c.loading ? 'Выполняем…' : esc(c.confirm_label || 'Подтвердить')}
                     </button>
@@ -1295,12 +1291,6 @@ async function renderDashboardV2Screen() {
     const speedSuffix = speedDanger ? ' — выше нормы' : '';
     const speedText = speedIsNum ? `${Math.round(speedMinutes)} мин${speedSuffix}` : 'нет данных';
 
-    const cancelPctRaw = m.paidCancelledPercent;
-    const cancelIsNum = typeof cancelPctRaw === 'number' && Number.isFinite(cancelPctRaw);
-    const cancelDanger = cancelIsNum && cancelPctRaw > 7;
-    const cancelSuffix = cancelDanger ? ' — выше нормы' : '';
-    const cancelText = cancelIsNum ? `${dashboardFormatPct(cancelPctRaw)}%${cancelSuffix}` : 'нет данных';
-
     const ac = m.abandonedCarts && typeof m.abandonedCarts === 'object' ? m.abandonedCarts : null;
     const abandonedLineHtml = ac
         ? `акт. ${formatNum(ac.active || 0)} · брош. ${formatNum(ac.abandoned || 0)} · увед. ${formatNum(
@@ -1317,24 +1307,29 @@ async function renderDashboardV2Screen() {
     const topCarouselInner =
         topProducts.length === 0
             ? `<div class="dashboard-v2__empty-soft">Нет данных по товарам за период</div>`
-            : `<div class="dashboard-v2__top-carousel" role="list">${topProducts
-                  .map((row) => {
-                      const name = row != null && row.name != null ? String(row.name).trim() : '';
-                      const dispName = name || 'Товар';
-                      const qty = Math.round(Number(row && row.quantity) || 0);
-                      const img = String((row && (row.image_url || row.imageUrl)) || '').trim();
-                      const imgBlock = img
-                          ? `<img class="dashboard-v2__top-card-img" src="${esc(img)}" alt="" loading="lazy" />`
-                          : `<div class="dashboard-v2__top-card-img dashboard-v2__top-card-img--ph" aria-hidden="true"></div>`;
-                      return `<div class="dashboard-v2__top-card" role="listitem">
+            : `<div class="dashboard-v2__top-carousel-shell">
+            <button type="button" class="dashboard-v2__top-carousel-arrow" data-f21-dash-top-carousel-prev aria-label="Предыдущие товары">‹</button>
+            <div class="dashboard-v2__top-carousel" data-f21-dashboard-top-carousel tabindex="0" role="list">${topProducts
+                .map((row) => {
+                    const name = row != null && row.name != null ? String(row.name).trim() : '';
+                    const dispName = name || 'Товар';
+                    const qty = Math.round(Number(row && row.quantity) || 0);
+                    const img = String((row && (row.image_url || row.imageUrl)) || '').trim();
+                    const imgBlock = img
+                        ? `<img class="dashboard-v2__top-card-img" src="${esc(img)}" alt="" loading="lazy" decoding="async" data-f21-top-product-img="1" />`
+                        : `<div class="dashboard-v2__top-card-img dashboard-v2__top-card-img--ph" aria-hidden="true"></div>`;
+                    return `<div class="dashboard-v2__top-card" role="listitem">
                         ${imgBlock}
                         <div class="dashboard-v2__top-card-body">
                             <div class="dashboard-v2__top-card-name">${esc(dispName)}</div>
                             <div class="dashboard-v2__top-card-buy">Купили: ${formatNum(qty)}</div>
                         </div>
                     </div>`;
-                  })
-                  .join('')}</div>`;
+                })
+                .join('')}
+            </div>
+            <button type="button" class="dashboard-v2__top-carousel-arrow" data-f21-dash-top-carousel-next aria-label="Следующие товары">›</button>
+        </div>`;
 
     const presetToday = state.dashboardPreset === 'today';
     const preset7d = state.dashboardPreset === '7d';
@@ -1443,7 +1438,6 @@ async function renderDashboardV2Screen() {
                 <button type="button" class="dashboard-v2__dash-row" data-action="open-abandoned-carts" aria-label="Брошенные корзины, открыть список">
                     <span>${esc('Брошенные корзины')}</span><strong>${ac ? esc(abandonedLineHtml) : esc('нет данных')}</strong>
                 </button>
-                ${renderDashMetricRow('Возвраты / отмены после оплаты', esc(cancelText), cancelDanger, 'returns_cancel')}
             </div>
 
             <h3 class="dashboard-v2__section-title">Аналитика</h3>
@@ -2006,7 +2000,7 @@ async function renderPromoScreen() {
         </label>
         <p class="promo-hint-small">Если код пустой, он будет сгенерирован из названия.</p>
         <div class="promo-form-actions">
-          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-source">Отмена</button>
+          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-source">Закрыть</button>
           <button type="button" class="promo-cta promo-cta--grow" data-action="promo-submit-source">Создать источник</button>
         </div>
       </div>`
@@ -2030,7 +2024,7 @@ async function renderPromoScreen() {
           <input type="text" id="promoBcKw" maxlength="64" placeholder="роза" required />
         </label>
         <div class="promo-form-actions">
-          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-broadcast">Отмена</button>
+          <button type="button" class="promo-btn-secondary" data-action="promo-cancel-broadcast">Закрыть</button>
           <button type="button" class="promo-cta promo-cta--grow" data-action="promo-submit-broadcast">Сохранить карточку</button>
         </div>
       </div>`
@@ -2434,7 +2428,7 @@ async function renderClientsScreen() {
         { id: 'repeat', label: 'Повторные', value: totals.repeat },
         { id: 'vip', label: 'VIP', value: totals.vip },
         { id: 'sleeping', label: 'Спящие', value: totals.sleeping },
-        { id: 'return', label: 'Стоит вернуть', value: totals.returnable }
+        { id: 'return', label: 'Реактивация', value: totals.returnable }
     ];
     const chips = [
         { id: 'all', label: 'Все' },
@@ -2453,7 +2447,7 @@ async function renderClientsScreen() {
     ];
 
     return `
-        ${sectionHeader('Клиенты как CRM прибыли', 'Кто приносит выручку, кто покупает повторно и кого вернуть')}
+        ${sectionHeader('Клиенты как CRM прибыли', 'Кто приносит выручку, кто покупает повторно и кто готов к реактивации')}
         ${renderPlaybookBanner('clients')}
         <form id="clientsSearchForm" class="search-row">
             <input type="search" id="clientsSearchInput" value="${esc(state.clientsQ)}" placeholder="Имя, username или Telegram ID" />
@@ -2476,7 +2470,7 @@ async function renderClientsScreen() {
         <article class="list-card">
             <h3 class="list-card-title">Что важно по клиентам</h3>
             <p class="list-card-meta">Спящие: ${formatNum(totals.sleeping)} · VIP: ${formatNum(totals.vip)} · Требуют внимания: ${formatNum(segments.attention)}</p>
-            <p class="list-card-meta">Новые без повтора: ${formatNum(segments.newWithoutRepeat)} · Можно вернуть: ${formatNum(totals.returnable)}</p>
+            <p class="list-card-meta">Новые без повтора: ${formatNum(segments.newWithoutRepeat)} · Кандидаты на реактивацию: ${formatNum(totals.returnable)}</p>
         </article>
         ${renderPlaybookCards({ source: 'Клиенты', target: 'clients', limit: 3 })}
 
@@ -3442,12 +3436,95 @@ async function renderApp() {
         state.lastRefreshedAt = new Date().toISOString();
         root.innerHTML = renderShell(content);
         bindForms();
+        bindDashboardTopCarousel();
         await hydratePromoAuthImages();
         saveUiState();
     } catch (e) {
         if (version !== renderVersion) return;
         root.innerHTML = renderShell(errorState(e.message));
     }
+}
+
+function bindDashboardTopCarousel() {
+    const wrap = document.querySelector('.dashboard-v2__top-carousel-shell');
+    const scroller = document.querySelector('[data-f21-dashboard-top-carousel]');
+    if (!wrap || !scroller) return;
+
+    const prev = wrap.querySelector('[data-f21-dash-top-carousel-prev]');
+    const next = wrap.querySelector('[data-f21-dash-top-carousel-next]');
+    if (!prev || !next) return;
+    if (prev.dataset.f21TopNavBound === '1') return;
+    prev.dataset.f21TopNavBound = '1';
+    next.dataset.f21TopNavBound = '1';
+
+    const stepPx = () => {
+        try {
+            const card = scroller.querySelector('.dashboard-v2__top-card');
+            if (!card) return Math.round(scroller.clientWidth * 0.72);
+            const styles = window.getComputedStyle(scroller);
+            const gap = parseFloat(styles.columnGap || styles.gap || '0') || 0;
+            return Math.max(120, Math.round(card.getBoundingClientRect().width + gap));
+        } catch (_) {
+            return Math.round(scroller.clientWidth * 0.72);
+        }
+    };
+
+    const update = () => {
+        try {
+            const max = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+            const needs = max > 6;
+            prev.toggleAttribute('hidden', !needs);
+            next.toggleAttribute('hidden', !needs);
+            if (!needs) return;
+            const left = scroller.scrollLeft;
+            prev.disabled = left <= 2;
+            next.disabled = left >= max - 2;
+        } catch (_) {
+            /* ignore */
+        }
+    };
+
+    prev.addEventListener(
+        'click',
+        (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            scroller.scrollBy({ left: -stepPx(), behavior: 'smooth' });
+        },
+        { passive: false }
+    );
+    next.addEventListener(
+        'click',
+        (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            scroller.scrollBy({ left: stepPx(), behavior: 'smooth' });
+        },
+        { passive: false }
+    );
+
+    scroller.addEventListener('scroll', () => window.requestAnimationFrame(update), { passive: true });
+    window.addEventListener('resize', () => window.requestAnimationFrame(update), { passive: true });
+
+    wrap.querySelectorAll('img[data-f21-top-product-img="1"]').forEach((img) => {
+        img.addEventListener(
+            'error',
+            () => {
+                try {
+                    const ph = document.createElement('div');
+                    ph.className = 'dashboard-v2__top-card-img dashboard-v2__top-card-img--ph';
+                    ph.setAttribute('aria-hidden', 'true');
+                    img.replaceWith(ph);
+                } catch (_) {
+                    /* ignore */
+                }
+                window.requestAnimationFrame(update);
+            },
+            { once: true }
+        );
+    });
+
+    window.requestAnimationFrame(update);
 }
 
 function bindForms() {
@@ -3683,7 +3760,7 @@ async function handleAction(action, value, eventTarget) {
                 message: `Корзина #${id} будет помечена как устаревшая.`,
                 severity: 'normal',
                 confirm_label: 'Пометить',
-                cancel_label: 'Отмена'
+                cancel_label: 'Закрыть'
             },
             async () => {
                 await runGuardedAction(`abandoned-expire-${id}`, async () => {
@@ -3703,7 +3780,7 @@ async function handleAction(action, value, eventTarget) {
                 message: `Повторная отправка в тему брошенных корзин для #${id}. Учитывайте лимиты Telegram.`,
                 severity: 'normal',
                 confirm_label: 'Отправить',
-                cancel_label: 'Отмена'
+                cancel_label: 'Закрыть'
             },
             async () => {
                 await runGuardedAction(`abandoned-notify-${id}`, async () => {
@@ -3834,7 +3911,7 @@ async function handleAction(action, value, eventTarget) {
                     impact_summary: 'Проверьте аудиторию и контекст перед следующим шагом.',
                     severity: 'high',
                     confirm_label: 'Продолжить',
-                    cancel_label: 'Отмена',
+                    cancel_label: 'Закрыть',
                     secondary_note: 'Это high-impact сценарий роста',
                     irreversible_warning: false
                 }, async () => {
@@ -3917,7 +3994,7 @@ async function handleAction(action, value, eventTarget) {
             impact_summary: 'Действие затрагивает получателей кампании и может быть необратимым.',
             severity: 'destructive',
             confirm_label: 'Удалить у получателей',
-            cancel_label: 'Отмена',
+            cancel_label: 'Закрыть',
             secondary_note: 'Проверьте, что выбрана нужная кампания.',
             irreversible_warning: true
         }, async () => {
@@ -3951,7 +4028,7 @@ async function handleAction(action, value, eventTarget) {
                 impact_summary: 'После запуска откроется prefilled flow для high-impact действий.',
                 severity: 'high',
                 confirm_label: 'Запустить сценарий',
-                cancel_label: 'Отмена',
+                cancel_label: 'Закрыть',
                 secondary_note: 'Проверьте, что вы запускаете правильный сценарий.',
                 irreversible_warning: false
             }, async () => {
@@ -3989,7 +4066,7 @@ async function handleAction(action, value, eventTarget) {
             impact_summary: 'Проверьте выбранные переключатели перед сохранением.',
             severity: 'high',
             confirm_label: 'Сохранить флаги',
-            cancel_label: 'Отмена',
+            cancel_label: 'Закрыть',
             secondary_note: 'Часть изменений может требовать перезапуск backend.',
             irreversible_warning: false
         }, async () => {
@@ -4009,7 +4086,7 @@ async function handleAction(action, value, eventTarget) {
             impact_summary: 'Действие может повторно запустить связанный процесс.',
             severity: 'normal',
             confirm_label: 'Повторить обработку',
-            cancel_label: 'Отмена',
+            cancel_label: 'Закрыть',
             secondary_note: 'Используйте только если уверены, что ошибка уже устранена.',
             irreversible_warning: false
         }, async () => {
@@ -4046,11 +4123,11 @@ async function handleAction(action, value, eventTarget) {
         openConfirmationSheet(
             {
                 title: 'Удалить источник?',
-                message: 'Источник будет удалён из списка. Это действие нельзя отменить.',
+                message: 'Источник будет удалён из списка. Это действие необратимо.',
                 impact_summary: '',
                 severity: 'destructive',
                 confirm_label: 'Удалить',
-                cancel_label: 'Отмена',
+                cancel_label: 'Закрыть',
                 irreversible_warning: false
             },
             async () => {
@@ -4101,7 +4178,7 @@ async function handleAction(action, value, eventTarget) {
                 impact_summary: '',
                 severity: 'high',
                 confirm_label: 'Разместить ещё раз',
-                cancel_label: 'Отмена',
+                cancel_label: 'Закрыть',
                 irreversible_warning: false
             },
             async () => {
@@ -4146,7 +4223,7 @@ async function handleAction(action, value, eventTarget) {
                 impact_summary: '',
                 severity: 'high',
                 confirm_label: 'Разместить',
-                cancel_label: 'Отмена',
+                cancel_label: 'Закрыть',
                 irreversible_warning: false
             },
             async () => {
@@ -4191,7 +4268,7 @@ async function handleAction(action, value, eventTarget) {
                 impact_summary: '',
                 severity: 'destructive',
                 confirm_label: 'Удалить',
-                cancel_label: 'Отмена',
+                cancel_label: 'Закрыть',
                 irreversible_warning: false
             },
             async () => {

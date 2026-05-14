@@ -15,7 +15,6 @@ const { fetchAbandonedCartDashboardSnapshot } = require('./abandoned-cart-servic
 
 /** Должно совпадать с order-status.js (алиас o). */
 const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
-const CANCELLED_SQL_O = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
 
 const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
 const DASHBOARD_SYSTEM_NONE_TITLE = 'Без источника';
@@ -247,9 +246,26 @@ function extractItemImageUrl(item) {
     const keys = ['image_url', 'imageUrl', 'image', 'picture', 'photo', 'thumb', 'thumbnail', 'img'];
     for (const k of keys) {
         const v = item[k];
-        if (typeof v === 'string' && v.trim()) return v.trim();
+        if (typeof v === 'string' && v.trim()) return normalizeProductMediaUrl(v.trim());
+        if (Array.isArray(v) && v.length) {
+            const first = v.find((x) => typeof x === 'string' && x.trim());
+            if (first) return normalizeProductMediaUrl(first.trim());
+        }
     }
     return null;
+}
+
+/**
+ * Нормализует относительные пути медиа до корневых URL мини-приложения (и мини-админки на том же origin).
+ * Отмены/возвраты в бизнес-логике проекта намеренно не поддерживаются — этот слой только про отображение витрины/дашборда.
+ */
+function normalizeProductMediaUrl(raw) {
+    const s = String(raw ?? '').trim();
+    if (!s) return null;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (s.startsWith('//')) return `https:${s}`;
+    if (s.startsWith('/')) return s;
+    return `/${s}`;
 }
 
 function firstImageFromProductsJson(raw) {
@@ -258,11 +274,11 @@ function firstImageFromProductsJson(raw) {
         const parsed = JSON.parse(String(raw));
         if (Array.isArray(parsed)) {
             for (const el of parsed) {
-                if (typeof el === 'string' && el.trim()) return el.trim();
+                if (typeof el === 'string' && el.trim()) return normalizeProductMediaUrl(el.trim());
                 if (el && typeof el === 'object') {
                     const u =
                         el.url || el.src || el.image || el.image_url || el.imageUrl;
-                    if (typeof u === 'string' && u.trim()) return u.trim();
+                    if (typeof u === 'string' && u.trim()) return normalizeProductMediaUrl(u.trim());
                 }
             }
         }
@@ -475,22 +491,27 @@ async function fetchDashboardSourcesForRange(range) {
 }
 
 async function hydrateTopProductImages(items) {
-    const missing = items.filter((x) => !x.imageUrl).map((x) => x.name);
-    if (!missing.length) return items;
+    const stamped = items.map((it) => {
+        const u = it && it.imageUrl ? normalizeProductMediaUrl(it.imageUrl) : null;
+        if (u) return u === it.imageUrl ? it : { ...it, imageUrl: u };
+        return { ...it, imageUrl: null };
+    });
+    const missing = stamped.filter((x) => !x.imageUrl).map((x) => x.name);
+    if (!missing.length) return stamped;
     const unique = [...new Set(missing)].slice(0, 30);
     const ph = unique.map(() => '?').join(',');
     let rows = [];
     try {
         rows = await dbAll(`SELECT name, images_json FROM products WHERE name IN (${ph})`, unique);
     } catch (_) {
-        return items;
+        return stamped;
     }
     const byName = new Map((rows || []).map((r) => [String(r.name || ''), r]));
-    return items.map((it) => {
+    return stamped.map((it) => {
         if (it.imageUrl) return it;
         const pr = byName.get(it.name);
         if (!pr) return it;
-        const url = firstImageFromProductsJson(pr.images_json);
+        const url = normalizeProductMediaUrl(firstImageFromProductsJson(pr.images_json));
         return url ? { ...it, imageUrl: url } : it;
     });
 }
@@ -510,9 +531,7 @@ async function fetchDashboardMetricsForRange(range) {
         usersRow,
         ordersDistinctRow,
         ordersRepeatInPeriodRow,
-        supportRow,
-        paidInPeriodRow,
-        paidCancelledInPeriodRow
+        supportRow
     ] = await Promise.all([
         dbAll(
             `
@@ -557,25 +576,6 @@ async function fetchDashboardMetricsForRange(range) {
               AND TRIM(first_manager_response_at) <> ''
             `,
             [periodStartIso, periodEndIso]
-        ),
-        dbGet(
-            `
-            SELECT COUNT(*) AS c
-            FROM orders o
-            WHERE o.created_at >= ? AND o.created_at <= ?
-              AND (${PAID_SQL_O})
-            `,
-            [periodStartIso, periodEndIso]
-        ),
-        dbGet(
-            `
-            SELECT COUNT(*) AS c
-            FROM orders o
-            WHERE o.created_at >= ? AND o.created_at <= ?
-              AND (${PAID_SQL_O})
-              AND (${CANCELLED_SQL_O})
-            `,
-            [periodStartIso, periodEndIso]
         )
     ]);
 
@@ -608,17 +608,6 @@ async function fetchDashboardMetricsForRange(range) {
     const avgResponseMinutes =
         avgResp != null && Number.isFinite(Number(avgResp)) ? Math.round(Number(avgResp)) : null;
 
-    /**
-     * paid_cancelled_orders / paid_orders в периоде;
-     * PAID_SQL_O + CANCELLED_SQL_O как в order-status (без отдельного refund в БД).
-     */
-    const paidDen = Number(paidInPeriodRow?.c || 0);
-    const paidCancelled = Number(paidCancelledInPeriodRow?.c || 0);
-    let returnsAfterPayPct = null;
-    if (paidDen > 0) {
-        returnsAfterPayPct = Math.round((paidCancelled / paidDen) * 1000) / 10;
-    }
-
     const topRaw = aggregateTopProductsFromOrders(orderRowsArr);
     const topProducts = await hydrateTopProductImages(topRaw);
 
@@ -636,7 +625,6 @@ async function fetchDashboardMetricsForRange(range) {
         avgLtvRub,
         avgLtvKopecks,
         avgResponseMinutes,
-        returnsAfterPayPct,
         topProducts
     };
 }
@@ -702,8 +690,7 @@ async function getDashboardV2ApiPayload(opts) {
             averageLtvKopecks: Math.round(Number(m.avgLtvKopecks || 0)),
             avgFirstResponseMinutes:
                 m.avgResponseMinutes == null ? null : Math.round(Number(m.avgResponseMinutes)),
-            abandonedCarts: abandonedSnapshot,
-            paidCancelledPercent: m.returnsAfterPayPct
+            abandonedCarts: abandonedSnapshot
         },
         topProducts: (Array.isArray(m.topProducts) ? m.topProducts : []).map((row) => {
             if (Array.isArray(row)) {

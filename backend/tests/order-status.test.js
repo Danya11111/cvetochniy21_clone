@@ -2,7 +2,8 @@ const assert = require('assert');
 const {
     isOrderPaidForOps,
     deriveOrderAdminPresentation,
-    buildOrdersListWhereClause
+    buildOrdersListWhereClause,
+    isLegacyInactiveRawStatus
 } = require('../order-status');
 
 function test(name, fn) {
@@ -39,10 +40,32 @@ test('label payment_failed', () => {
     assert.strictEqual(u.status_code, 'payment_failed');
 });
 
-test('list filter payment_failed excludes cancelled bucket', () => {
+test('refunded rows map to legacy archive label', () => {
+    const u = deriveOrderAdminPresentation({ status: 'REFUNDED', total_paid: 0 });
+    assert.strictEqual(u.status_code, 'legacy_inactive');
+    assert.ok(String(u.status_label).includes('Архивный'));
+});
+
+test('payment_failed not legacy inactive classifier', () => {
+    assert.strictEqual(isLegacyInactiveRawStatus('PAYMENT_FAILED'), false);
+});
+
+test('list filter payment_failed excludes legacy archive bucket tokens', () => {
     const { clause } = buildOrdersListWhereClause({ status_code: 'payment_failed', status: '' });
     assert.ok(clause.includes('PAYMENT_FAILED'));
+    assert.ok(!clause.includes('REFUND'));
     assert.ok(!clause.includes('CANCELLED'));
+});
+
+test('legacy refunded rows excluded from unpaid list semantics', () => {
+    const { clause } = buildOrdersListWhereClause({ status_code: 'unpaid', status: '' });
+    assert.ok(clause.includes('NOT'));
+    assert.ok(clause.includes('REFUND'));
+});
+
+test('list filter legacy_inactive aligns with refunded', () => {
+    const { clause } = buildOrdersListWhereClause({ status_code: 'legacy_inactive', status: '' });
+    assert.ok(clause.includes('REFUNDED'));
 });
 
 test('list filter paid by status_code', () => {

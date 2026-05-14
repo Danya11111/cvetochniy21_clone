@@ -1725,6 +1725,31 @@ function renderAddressesProfile() {
 
 
 
+
+function formatOrderProfileStatus(order) {
+    const raw =
+        order && order.status_human != null
+            ? String(order.status_human).trim()
+            : order && order.status_ui != null
+              ? String(order.status_ui).trim()
+              : String((order && (order.displayStatus || order.status)) || '').trim();
+
+    const u = raw.toUpperCase();
+    if (!raw) return 'В работе';
+    if (u === 'PAYMENT_FAILED') return 'Оплата не прошла';
+    if (/PAYMENT\s*FAILED|оплата\s+не\s+прошла/i.test(raw)) return 'Оплата не прошла';
+    if (
+        ['CANCELLED', 'CANCELED', 'FAILED', 'ERROR', 'REFUNDED', 'RETURNED'].includes(u) ||
+        u.includes('CANCEL') ||
+        u.includes('REFUND')
+    ) {
+        return 'Архивный статус';
+    }
+    if (/\b(отмен|возврат)\b/i.test(raw)) return 'Архивный статус';
+
+    return raw;
+}
+
 function renderOrdersProfile() {
     const content = document.getElementById('profileContent');
     const activeTab =
@@ -1756,7 +1781,7 @@ function renderOrdersProfile() {
 
         const status = document.createElement('div');
         status.className = 'order-status';
-        status.textContent = order.status;
+        status.textContent = formatOrderProfileStatus(order);
 
         header.appendChild(idEl);
         header.appendChild(status);
@@ -2617,7 +2642,7 @@ async function waitForOrderCompletion(orderId, {
                 return true;
             }
 
-            // НЕУСПЕХ: отмена/ошибка
+            // Завершение ожидания оплаты: успех только по PAID; отдельная ветка для непрошедшей оплаты (не смешиваем с архивными статусами).
             if (
                 data.status === 'CANCELLED' ||
                 data.status === 'REJECTED' ||

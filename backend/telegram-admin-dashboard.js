@@ -41,7 +41,6 @@ function buildDashboardText(metrics) {
     lines.push('Сервис и качество');
     lines.push(...speedLines(metrics));
     lines.push('Брошенные корзины: нет данных');
-    lines.push(...returnsLines(metrics));
     lines.push('');
     lines.push('Аналитика');
     lines.push('Топ товаров:');
@@ -77,27 +76,22 @@ function speedLines(metrics) {
     return [`Скорость ответа: ${m} мин`];
 }
 
-function returnsLines(metrics) {
-    const p = metrics.returnsAfterPayPct;
-    if (p == null) {
-        return ['Возвраты/отмены после оплаты: нет данных'];
-    }
-    if (p > 7) {
-        return [`🔴 Возвраты/отмены после оплаты: ${pctFmt(p)}% — выше нормы`];
-    }
-    return [`Возвраты/отмены после оплаты: ${pctFmt(p)}%`];
-}
-
 function topProductLines(topProducts) {
     if (!topProducts.length) {
         return ['нет данных'];
     }
     const out = [];
-    topProducts.forEach((entry, idx) => {
-        const [name, qty] = entry;
+    topProducts.slice(0, 3).forEach((entry, idx) => {
+        if (Array.isArray(entry)) {
+            const [name, qty] = entry;
+            out.push(`${idx + 1}. ${name} — ${qty} шт`);
+            return;
+        }
+        const name = String((entry && entry.name) || '').trim() || 'Товар';
+        const qty = Math.round(Number((entry && (entry.qty != null ? entry.qty : entry.quantity)) || 0));
         out.push(`${idx + 1}. ${name} — ${qty} шт`);
     });
-    return out.slice(0, 3);
+    return out;
 }
 
 /** @param {'today'|'7d'} periodKey @param {'dash'|'promo'} view */

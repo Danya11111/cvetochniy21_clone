@@ -9,7 +9,7 @@ const {
     formatKopecksRu,
     sqlOrderPaidRevenueKopecks
 } = require('./money');
-const { isOrderPaidForOps, deriveOrderAdminPresentation, buildOrdersListWhereClause } = require('./order-status');
+const { isOrderPaidForOps, deriveOrderAdminPresentation, buildOrdersListWhereClause, isLegacyInactiveRawStatus } = require('./order-status');
 const { computeThreadWaitingForStaff } = require('./support-waiting');
 
 const SQL_ORDER_REVENUE_KOPEKS_O = sqlOrderPaidRevenueKopecks('o');
@@ -170,7 +170,7 @@ function enrichOrderRow(row, now = new Date()) {
     if (!isPaid && isUrgent) riskReasons.push('Доставка скоро, нужно ускорить обработку');
     if (!isPaid && isLargeOrder) riskReasons.push('Крупная сумма пока не зафиксирована');
     if (!isPaid && createdAgoHours >= 12) riskReasons.push('Заказ долго без движения');
-    if (['CANCELLED', 'FAILED', 'ERROR'].includes(statusUpper)) riskReasons.push('Статус требует ручной проверки');
+    if (isLegacyInactiveRawStatus(statusRaw)) riskReasons.push('Архивный статус в данных — действий по отмене/возврату через приложение нет');
     if (!isPaid && isRepeatClient) riskReasons.push('Повторный клиент ждет подтверждения');
     if (statusUpper === 'PAYMENT_FAILED') riskReasons.push('Оплата не прошла — клиент может повторить попытку');
     const msFail = String(row.moysklad_sync_status || '').trim().toLowerCase();
@@ -1294,7 +1294,7 @@ function createAdminRepository() {
                 valueLabel: `${todayMetrics.repeatOrdersCount} заказов`,
                 summary: repeatTrend >= 0
                     ? `Рост ${repeatTrend}% к прошлой неделе. Удержание работает.`
-                    : `${Math.abs(repeatTrend)}% ниже прошлой недели. Есть потенциал возврата.`,
+                    : `${Math.abs(repeatTrend)}% ниже прошлой недели. Есть потенциал реактивации.`,
                 actionLabel: 'Открыть клиентов',
                 action: { screen: 'clients', filters: { clientFilter: 'sleeping' } }
             },
@@ -1945,9 +1945,9 @@ function createAdminRepository() {
                 id: 'return_candidates_focus',
                 category: 'retention',
                 priority: Number(clientTotals.returnable || 0) >= 8 ? 'high' : 'medium',
-                title: 'Есть клиенты, которых можно вернуть',
-                message: `${clientTotals.returnable} клиентов попадают в сегмент возврата. Это быстрая точка восстановления выручки.`,
-                businessImpactLabel: 'Потенциал возврата',
+                title: 'Есть клиенты для реактивации',
+                message: `${clientTotals.returnable} клиентов попадают в сегмент реактивации. Это быстрая точка восстановления выручки.`,
+                businessImpactLabel: 'Потенциал реактивации',
                 impactValue: Number(clientTotals.returnable || 0),
                 ctaLabel: 'Открыть сегмент',
                 targetScreen: 'clients',
@@ -2144,7 +2144,7 @@ function createAdminRepository() {
         addQuickWin({
             id: 'quick_sleeping_clients',
             title: 'Посмотреть спящих клиентов',
-            message: 'Быстрый шанс вернуть выручку через возврат клиентской базы.',
+            message: 'Быстрый шанс поднять выручку через реактивацию клиентской базы.',
             ctaLabel: 'Открыть',
             targetScreen: 'clients',
             targetFilters: { clientFilter: 'sleeping' },
@@ -2234,7 +2234,7 @@ function createAdminRepository() {
             quickWins: quickWins.slice(0, 6),
             neutralState: topActions.length === 0 ? {
                 title: 'Критичных действий сейчас нет',
-                message: 'Главные процессы под контролем. Можно сосредоточиться на росте и возврате клиентов.'
+                message: 'Главные процессы под контролем. Можно сосредоточиться на росте и реактивации клиентов.'
             } : null
         };
     }
@@ -2261,7 +2261,7 @@ function createAdminRepository() {
                 id: 'vip_return',
                 type: 'retention',
                 title: 'Вернуть VIP-клиентов',
-                message: 'Сфокусируйтесь на ценных клиентах в риске ухода и начните персональный возврат.',
+                message: 'Сфокусируйтесь на ценных клиентах в риске ухода и начните персональную реактивацию.',
                 category: 'retention',
                 priority: clientsTotals.returnable > 0 ? 'high' : 'medium',
                 business_goal: 'Сохранить LTV и повторные заказы',
