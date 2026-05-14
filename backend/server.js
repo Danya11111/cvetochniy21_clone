@@ -84,6 +84,7 @@ const { createAdminRouter } = require('./admin-routes');
 const { signAdminOpenToken, verifyAdminOpenToken } = require('./admin-open-token');
 const { buildTelegramBotCapabilitiesSnapshot } = require('./telegram-bot-capabilities');
 const { createPromotionService } = require('./promotion-service');
+const { createAdminUsersService } = require('./admin-users-service');
 
 const crypto = require('crypto');
 
@@ -236,11 +237,13 @@ async function markTelegramUpdateProcessed(updateId) {
         return { ok: false, error: e.message || 'UPDATE_TRACK_FAILED' };
     }
 }
-const adminAuth = createAdminAuth({ config, logger: console });
+const adminUsersService = createAdminUsersService(config, { logger: console });
+const adminAuth = createAdminAuth({ config, adminUsersService, logger: console });
 const adminRepository = createAdminRepository();
 const adminRouter = createAdminRouter({
     auth: adminAuth,
     adminRepository,
+    adminUsersService,
     runtimeFlagsService,
     broadcastService,
     promotionService,
@@ -882,7 +885,7 @@ function logAdminEmbedHit(req, res, next) {
 }
 
 /** GET /admin-embed и GET /admin: только stateless signed ?h= (без cookie, без in-memory handoff). */
-function ensureAdminEmbedAccess(req, res, next) {
+async function ensureAdminEmbedAccess(req, res, next) {
     const h = String(req.query?.h || '').trim();
     if (!h) {
         const hasReturnTo = !!String(req.query?.returnTo || '').trim();
@@ -901,19 +904,24 @@ function ensureAdminEmbedAccess(req, res, next) {
         console.log('[AdminEmbed] token_invalid', { reason: v.reason || 'verify_failed' });
         return res.status(403).type('text/plain; charset=utf-8').send('Admin access denied or expired');
     }
-    const resolved = adminAuth.resolveFromInitDataRaw(v.initDataRaw);
-    if (!resolved.ok) {
-        console.log('[AdminEmbed] token_invalid', { reason: 'initdata_or_role' });
-        return res.status(403).type('text/plain; charset=utf-8').send('Admin access denied');
+    try {
+        const resolved = await adminAuth.resolveFromInitDataRaw(v.initDataRaw);
+        if (!resolved.ok) {
+            console.log('[AdminEmbed] token_invalid', { reason: 'initdata_or_role' });
+            return res.status(403).type('text/plain; charset=utf-8').send('Admin access denied');
+        }
+        console.log('[AdminEmbed] token_valid', {
+            telegramId: resolved.principal.telegramId,
+            tokenTtlSec: v.tokenTtlSec,
+            buildId: FRONTEND_BUILD_ID
+        });
+        req.admin = resolved.principal;
+        req.f21AdminInitDataRaw = resolved.initDataRaw;
+        return next();
+    } catch (e) {
+        console.error('[AdminEmbed] token_resolve_failed', { message: e.message || String(e) });
+        return res.status(500).type('text/plain; charset=utf-8').send('Admin access error');
     }
-    console.log('[AdminEmbed] token_valid', {
-        telegramId: resolved.principal.telegramId,
-        tokenTtlSec: v.tokenTtlSec,
-        buildId: FRONTEND_BUILD_ID
-    });
-    req.admin = resolved.principal;
-    req.f21AdminInitDataRaw = resolved.initDataRaw;
-    next();
 }
 
 app.use((req, res, next) => {
@@ -1027,19 +1035,24 @@ app.use(
     })
 );
 
-app.get('/api/admin/access', (req, res) => {
-    const resolved = adminAuth.resolveAdminFromRequest(req);
-    if (!resolved.ok) {
-        return res.status(403).json({ ok: true, allowed: false });
-    }
-    return res.json({
-        ok: true,
-        allowed: true,
-        admin: {
-            telegramId: resolved.principal.telegramId,
-            adminId: resolved.principal.adminId
+app.get('/api/admin/access', async (req, res) => {
+    try {
+        const resolved = await adminAuth.resolveAdminFromRequest(req);
+        if (!resolved.ok) {
+            return res.status(403).json({ ok: true, allowed: false });
         }
-    });
+        return res.json({
+            ok: true,
+            allowed: true,
+            admin: {
+                telegramId: resolved.principal.telegramId,
+                adminId: resolved.principal.adminId
+            }
+        });
+    } catch (e) {
+        console.error('[AdminAccess] probe_failed', { message: e.message || String(e) });
+        return res.status(500).json({ ok: false, allowed: false, error: 'ACCESS_PROBE_FAILED' });
+    }
 });
 
 app.use('/api/admin', adminRouter);
@@ -1048,7 +1061,7 @@ app.use('/api/admin', adminRouter);
  * Document navigation: HTML form POST → 303 → GET /admin-embed?h=…
  * (без fetch/handoff JSON; витрина не зависит от XHR.)
  */
-app.post('/admin-launch', (req, res) => {
+app.post('/admin-launch', async (req, res) => {
     console.log('[AdminLaunch] request', {
         contentType: String(req.headers['content-type'] || '').slice(0, 48),
         hasTgField: !!(req.body && (req.body.tgWebAppData || req.body.initData)),
@@ -1059,26 +1072,31 @@ app.post('/admin-launch', (req, res) => {
     }
     const initData = String((req.body && (req.body.tgWebAppData || req.body.initData)) || '').trim();
     const fakeReq = { headers: { 'x-telegram-init-data': initData }, query: {}, path: '/admin-launch' };
-    const resolved = adminAuth.resolveAdminFromRequest(fakeReq);
-    if (!resolved.ok || !resolved.initDataRaw) {
-        console.warn('[AdminLaunch] denied', { error: resolved.error || 'FORBIDDEN' });
-        return res.status(403).type('text/plain; charset=utf-8').send('Access denied');
+    try {
+        const resolved = await adminAuth.resolveAdminFromRequest(fakeReq);
+        if (!resolved.ok || !resolved.initDataRaw) {
+            console.warn('[AdminLaunch] denied', { error: resolved.error || 'FORBIDDEN' });
+            return res.status(403).type('text/plain; charset=utf-8').send('Access denied');
+        }
+        const tid = String(resolved.principal.telegramId || '');
+        console.log('[AdminLaunch] verified_admin', { telegramId: tid });
+        const tokenTtlSec = 90;
+        const secret = getAdminOpenSecret();
+        const signed = signAdminOpenToken(resolved.initDataRaw, tid, secret, tokenTtlSec);
+        const returnTo = sanitizeReturnToForAdmin(req.body && req.body.returnTo);
+        const loc = `/admin-embed?h=${encodeURIComponent(signed)}&returnTo=${encodeURIComponent(returnTo)}`;
+        console.log('[AdminLaunch] redirect_to_embed', {
+            tokenTtlSec,
+            buildId: FRONTEND_BUILD_ID,
+            returnToLen: returnTo.length,
+            path: '/admin-embed'
+        });
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+        return res.redirect(303, loc);
+    } catch (e) {
+        console.error('[AdminLaunch] error', { message: e.message || String(e) });
+        return res.status(500).type('text/plain; charset=utf-8').send('Access error');
     }
-    const tid = String(resolved.principal.telegramId || '');
-    console.log('[AdminLaunch] verified_admin', { telegramId: tid });
-    const tokenTtlSec = 90;
-    const secret = getAdminOpenSecret();
-    const signed = signAdminOpenToken(resolved.initDataRaw, tid, secret, tokenTtlSec);
-    const returnTo = sanitizeReturnToForAdmin(req.body && req.body.returnTo);
-    const loc = `/admin-embed?h=${encodeURIComponent(signed)}&returnTo=${encodeURIComponent(returnTo)}`;
-    console.log('[AdminLaunch] redirect_to_embed', {
-        tokenTtlSec,
-        buildId: FRONTEND_BUILD_ID,
-        returnToLen: returnTo.length,
-        path: '/admin-embed'
-    });
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    return res.redirect(303, loc);
 });
 
 // === API ===
@@ -1483,6 +1501,8 @@ app.post('/api/checkout', async (req, res) => {
             return res.status(400).json({ ok: false, error: 'BAD_REQUEST' });
         }
 
+        let checkoutWarningCode = null;
+
         const norm = s => String(s || '').trim().replace(/\s+/g, ' ');
         const normPhone = norm(phone);
 
@@ -1833,49 +1853,86 @@ app.post('/api/checkout', async (req, res) => {
         const msSyncHash = String(freshOrder.ms_sync_hash || '');
         const needMsSync = (msSyncHash !== checkoutHash);
 
-        const msSyncResult = await syncOrderToMoySkladOnCheckout({
-            needMsSync,
-            order,
-            checkoutHash,
-            sendOrderToMoySklad
-        });
-
-        if (!msSyncResult.ok) {
-            if (msSyncResult.error === 'checkout_failed_missing_ms_ids') {
-                return res.status(400).json({
-                    ok: false,
-                    error: 'checkout_failed_missing_ms_ids',
-                    details: {
-                        orderId: order.id,
-                        checkoutHash,
-                        needMsSync: true,
-                        itemsCount: msSyncResult.itemsCount,
-                        linesMissingMsId: msSyncResult.msMissingLines
-                    }
-                });
-            }
-            return res.status(503).json({
-                ok: false,
-                error: 'checkout_failed_moysklad_sync',
-                details: {
-                    orderId: order.id,
-                    checkoutHash,
-                    needMsSync: true,
-                    message:
-                        (msSyncResult.cause && msSyncResult.cause.message) ||
-                        String(msSyncResult.cause || 'MoySklad sync failed')
-                }
-            });
-        }
-
-        if (msSyncResult.ok && !msSyncResult.skipped) {
+        if (needMsSync && !String(config.MOYSKLAD_TOKEN || '').trim()) {
+            checkoutWarningCode = 'moysklad_degraded';
+            const reason = 'MOYSKLAD_TOKEN_NOT_CONFIGURED';
+            console.error(
+                '[Checkout] moysklad_token_missing',
+                JSON.stringify({ orderId: order.id, checkoutHash })
+            );
             await new Promise((resolve, reject) => {
                 db.run(
-                    'UPDATE orders SET ms_sync_hash = ? WHERE id = ?',
-                    [checkoutHash, order.id],
+                    `UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = ? WHERE id = ?`,
+                    ['moysklad_failed', reason, order.id],
                     err => (err ? reject(err) : resolve())
                 );
             });
+        } else {
+            if (
+                needMsSync &&
+                String(config.MOYSKLAD_TOKEN || '').trim()
+            ) {
+                await new Promise((resolve, reject) => {
+                    db.run(
+                        `UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = NULL WHERE id = ?`,
+                        ['moysklad_pending', order.id],
+                        err => (err ? reject(err) : resolve())
+                    );
+                });
+            }
+
+            const msSyncResult = await syncOrderToMoySkladOnCheckout({
+                needMsSync,
+                order,
+                checkoutHash,
+                sendOrderToMoySklad
+            });
+
+            if (!msSyncResult.ok) {
+                if (msSyncResult.error === 'checkout_failed_missing_ms_ids') {
+                    return res.status(400).json({
+                        ok: false,
+                        error: 'checkout_failed_missing_ms_ids',
+                        details: {
+                            orderId: order.id,
+                            checkoutHash,
+                            needMsSync: true,
+                            itemsCount: msSyncResult.itemsCount,
+                            linesMissingMsId: msSyncResult.msMissingLines
+                        }
+                    });
+                }
+
+                const failReason =
+                    (msSyncResult.cause && msSyncResult.cause.message) ||
+                    String(msSyncResult.cause || 'MoySklad sync failed');
+                console.error(
+                    '[Checkout] moysklad_sync_nonfatal',
+                    JSON.stringify({
+                        orderId: order.id,
+                        checkoutHash,
+                        reason: failReason
+                    })
+                );
+                checkoutWarningCode = 'moysklad_degraded';
+                await new Promise((resolve, reject) => {
+                    db.run(
+                        `UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = ? WHERE id = ?`,
+                        ['moysklad_failed', String(failReason).slice(0, 900), order.id],
+                        err => (err ? reject(err) : resolve())
+                    );
+                });
+            } else if (msSyncResult.ok && !msSyncResult.skipped) {
+                await new Promise((resolve, reject) => {
+                    db.run(
+                        'UPDATE orders SET ms_sync_hash = ?, moysklad_sync_status = ?, moysklad_sync_error = NULL WHERE id = ?',
+                        [checkoutHash, 'moysklad_synced', order.id],
+                        err => (err ? reject(err) : resolve())
+                    );
+                });
+            } else if (msSyncResult.ok && msSyncResult.skipped) {
+                // нет изменений корзины относительно последнего успешного sync — не дергаем МС
+            }
         }
 
         // 3) Оплата: если изменения были — НЕ переиспользуем старую PaymentURL
@@ -1902,12 +1959,14 @@ app.post('/api/checkout', async (req, res) => {
                     const paymentUrl = j.PaymentURL || j.PaymentUrl || j.paymentUrl || null;
                     if (paymentUrl) {
                         scheduleCheckoutFollowup({ telegramId, orderId: order.id });
-                        return res.json({
+                        const okBody = {
                             ok: true,
                             orderId: order.id,
                             paymentId: lastPayment.payment_id,
                             paymentUrl
-                        });
+                        };
+                        if (checkoutWarningCode) okBody.warning_code = checkoutWarningCode;
+                        return res.json(okBody);
                     }
                 } catch (_) {}
             }
@@ -1965,12 +2024,14 @@ app.post('/api/checkout', async (req, res) => {
             payment_id: paymentId
         });
 
-        return res.json({
+        const okBodyFinal = {
             ok: true,
             orderId: order.id,
             paymentUrl,
             paymentId
-        });
+        };
+        if (checkoutWarningCode) okBodyFinal.warning_code = checkoutWarningCode;
+        return res.json(okBodyFinal);
 
     } catch (e) {
         console.error('Checkout error:', e);
@@ -2235,6 +2296,13 @@ process.on('SIGINT', () => shutdownGracefully('SIGINT'));
         await db.awaitMigrations;
     } catch (e) {
         console.error('[Fatal] database migrations failed', e && e.message ? e.message : e);
+        process.exit(1);
+    }
+
+    try {
+        await adminUsersService.bootstrapIfNeeded();
+    } catch (e) {
+        console.error('[Fatal] admin_users bootstrap failed', e && e.message ? e.message : e);
         process.exit(1);
     }
 

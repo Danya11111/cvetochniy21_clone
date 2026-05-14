@@ -276,6 +276,16 @@ db.serialize(() => {
         )
     `);
 
+    /** Доступ в Mini App админку (источник истины после bootstrap; владелец всегда из env). */
+    db.run(`
+        CREATE TABLE IF NOT EXISTS admin_users (
+            telegram_id TEXT PRIMARY KEY NOT NULL,
+            created_at TEXT,
+            created_by_telegram_id TEXT,
+            is_owner INTEGER DEFAULT 0
+        )
+    `);
+
     db.run(`
         CREATE TABLE IF NOT EXISTS admin_action_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -566,6 +576,8 @@ async function runAllMigrationsAsync() {
 
         await ensureColumn('orders', 'paid_user_msg_sent', 'INTEGER DEFAULT 0');
         await ensureColumn('orders', 'source_code', 'TEXT');
+        await ensureColumn('orders', 'moysklad_sync_status', 'TEXT');
+        await ensureColumn('orders', 'moysklad_sync_error', 'TEXT');
 
         await ensureColumn('promotion_broadcasts', 'placement_status', "TEXT DEFAULT 'draft'");
         await ensureColumn('promotion_broadcasts', 'placed_at', 'TEXT');

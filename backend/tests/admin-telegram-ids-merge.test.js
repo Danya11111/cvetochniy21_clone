@@ -28,15 +28,14 @@ function test(name, fn) {
 }
 
 test('merge keeps defaults when env empty', () => {
-    const m = mergeAdminTelegramIdsWithDefaults('ADMIN_TELEGRAM_IDS', ['67460775', '659921032'], {});
-    assert.ok(m.includes('659921032'));
+    const m = mergeAdminTelegramIdsWithDefaults('ADMIN_TELEGRAM_IDS', ['67460775'], {});
     assert.ok(m.includes('67460775'));
 });
 
 test('merge unions env with defaults', () => {
-    const m = mergeAdminTelegramIdsWithDefaults('ADMIN_TELEGRAM_IDS', ['67460775', '659921032'], {
+    const m = mergeAdminTelegramIdsWithDefaults('ADMIN_TELEGRAM_IDS', ['67460775'], {
         ADMIN_TELEGRAM_IDS: '111'
     });
-    assert.ok(m.includes('659921032'));
+    assert.ok(m.includes('67460775'));
     assert.ok(m.includes('111'));
 });

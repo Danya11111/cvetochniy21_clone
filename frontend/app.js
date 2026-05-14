@@ -2388,17 +2388,22 @@ async function confirmCheckout() {
         const data = await resp.json();
         if (!data.ok) {
             const code = data.error || 'CHECKOUT_FAILED';
-            let msg = 'Ошибка при оформлении заказа';
+            let msg = 'Не получилось оформить заказ. Попробуйте чуть позже или напишите в поддержку.';
             if (code === 'checkout_failed_moysklad_sync') {
-                msg = 'Не удалось передать заказ в МойСклад. Попробуйте позже или напишите в поддержку.';
+                msg = 'Не удалось связать заказ с учётной системой. Попробуйте позже или напишите в поддержку.';
             } else if (code === 'checkout_failed_missing_ms_ids') {
-                msg = 'В корзине есть товар без привязки к каталогу МойСклад. Обновите страницу или выберите товар заново.';
+                msg = 'В корзине есть товар без привязки к каталогу. Обновите страницу или выберите товар заново.';
+            } else if (code === 'BAD_REQUEST') {
+                msg = 'Проверьте, что корзина не пустая и контактные данные заполнены.';
             }
-            alert(`${msg}\n(${code})`);
+            alert(msg);
             return;
         }
 
         const { paymentUrl, orderId } = data;
+        if (data.warning_code === 'moysklad_degraded') {
+            alert('Заказ принят и передан на оплату. Синхронизация с учётной системой временно не прошла — менеджер увидит заказ здесь.');
+        }
 
         if (window.Telegram && window.Telegram.WebApp) {
             Telegram.WebApp.openLink(paymentUrl);
@@ -2457,7 +2462,8 @@ async function waitForOrderCompletion(orderId, {
             if (
                 data.status === 'CANCELLED' ||
                 data.status === 'REJECTED' ||
-                data.status === 'FAILED'
+                data.status === 'FAILED' ||
+                data.status === 'PAYMENT_FAILED'
             ) {
                 return false;
             }

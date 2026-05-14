@@ -14,6 +14,7 @@ const {
 function createAdminRouter({
     auth,
     adminRepository,
+    adminUsersService,
     runtimeFlagsService,
     broadcastService,
     promotionService,
@@ -26,12 +27,22 @@ function createAdminRouter({
     router.use(auth.requireAdmin);
 
     router.get('/config', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
+        const ownerTg = adminUsersService && adminUsersService.getOwnerTelegramId ? adminUsersService.getOwnerTelegramId() : '';
+        const canManage =
+            adminUsersService && typeof adminUsersService.isOwnerTelegramId === 'function'
+                ? adminUsersService.isOwnerTelegramId(req.admin.telegramId)
+                : false;
         res.json({
             ok: true,
             admin: {
                 adminId: req.admin.adminId,
                 name: req.admin.name,
-                permissions: req.admin.permissions
+                permissions: req.admin.permissions,
+                role: canManage ? 'owner' : 'admin'
+            },
+            access: {
+                can_manage_admins: !!canManage,
+                owner_telegram_id: ownerTg ? String(ownerTg) : null
             },
             modules: {
                 dashboard: true,
@@ -47,6 +58,81 @@ function createAdminRouter({
             },
             permissionsCatalog: ALL_ADMIN_PERMISSIONS
         });
+    });
+
+    router.get('/admins', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
+        try {
+            const rows =
+                adminUsersService && typeof adminUsersService.listAdmins === 'function'
+                    ? await adminUsersService.listAdmins()
+                    : [];
+            res.json({ ok: true, data: rows });
+        } catch (e) {
+            console.error('[Admin] list admins failed:', e.message || e);
+            res.status(500).json({ ok: false, error: 'ADMINS_LIST_FAILED' });
+        }
+    });
+
+    router.post('/admins', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
+        try {
+            if (!adminUsersService || typeof adminUsersService.isOwnerTelegramId !== 'function') {
+                return res.status(501).json({ ok: false, error: 'ADMINS_ADMIN_SERVICE_MISSING' });
+            }
+            if (!adminUsersService.isOwnerTelegramId(req.admin.telegramId)) {
+                return res.status(403).json({ ok: false, error: 'OWNER_ONLY' });
+            }
+            const tid = String((req.body && req.body.telegram_id) || '').trim();
+            await adminUsersService.addAdmin(tid, req.admin.telegramId);
+            await adminRepository.logAction({
+                adminId: req.admin.adminId,
+                action: 'ADMIN_USER_ADD',
+                entityType: 'admin_user',
+                entityId: tid,
+                details: {}
+            });
+            res.json({ ok: true });
+        } catch (e) {
+            const c = String(e.code || e.message || '');
+            if (c.includes('BAD_TELEGRAM_ID')) {
+                return res.status(400).json({ ok: false, error: 'BAD_TELEGRAM_ID' });
+            }
+            if (c.includes('ALREADY_ADMIN') || c.includes('OWNER_ALREADY')) {
+                return res.status(409).json({ ok: false, error: e.code || 'ALREADY_ADMIN' });
+            }
+            console.error('[Admin] add admin failed:', e.message || e);
+            res.status(500).json({ ok: false, error: 'ADMIN_ADD_FAILED' });
+        }
+    });
+
+    router.delete('/admins/:telegramId', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {
+        try {
+            if (!adminUsersService || typeof adminUsersService.isOwnerTelegramId !== 'function') {
+                return res.status(501).json({ ok: false, error: 'ADMINS_ADMIN_SERVICE_MISSING' });
+            }
+            if (!adminUsersService.isOwnerTelegramId(req.admin.telegramId)) {
+                return res.status(403).json({ ok: false, error: 'OWNER_ONLY' });
+            }
+            const tid = String(req.params.telegramId || '').trim();
+            await adminUsersService.removeAdmin(tid, req.admin.telegramId);
+            await adminRepository.logAction({
+                adminId: req.admin.adminId,
+                action: 'ADMIN_USER_REMOVE',
+                entityType: 'admin_user',
+                entityId: tid,
+                details: {}
+            });
+            res.json({ ok: true });
+        } catch (e) {
+            const c = String(e.code || e.message || '');
+            if (c.includes('CANNOT_REMOVE_OWNER')) {
+                return res.status(400).json({ ok: false, error: 'CANNOT_REMOVE_OWNER' });
+            }
+            if (c.includes('NOT_FOUND')) {
+                return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
+            }
+            console.error('[Admin] remove admin failed:', e.message || e);
+            res.status(500).json({ ok: false, error: 'ADMIN_REMOVE_FAILED' });
+        }
     });
 
     router.get('/dashboard', auth.requirePermission(ADMIN_PERMISSIONS.ADMIN_DASHBOARD_VIEW), async (req, res) => {

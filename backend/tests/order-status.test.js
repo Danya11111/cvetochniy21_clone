@@ -34,6 +34,17 @@ test('legacy cyrillic status unpaid', () => {
     assert.ok(String(u.status_label).length > 0);
 });
 
+test('label payment_failed', () => {
+    const u = deriveOrderAdminPresentation({ status: 'PAYMENT_FAILED', total_paid: 0 });
+    assert.strictEqual(u.status_code, 'payment_failed');
+});
+
+test('list filter payment_failed excludes cancelled bucket', () => {
+    const { clause } = buildOrdersListWhereClause({ status_code: 'payment_failed', status: '' });
+    assert.ok(clause.includes('PAYMENT_FAILED'));
+    assert.ok(!clause.includes('CANCELLED'));
+});
+
 test('list filter paid by status_code', () => {
     const { clause } = buildOrdersListWhereClause({ status_code: 'paid', status: '' });
     assert.ok(clause.includes('total_paid'));

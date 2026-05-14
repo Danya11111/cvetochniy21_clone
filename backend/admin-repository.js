@@ -172,6 +172,12 @@ function enrichOrderRow(row, now = new Date()) {
     if (!isPaid && createdAgoHours >= 12) riskReasons.push('Заказ долго без движения');
     if (['CANCELLED', 'FAILED', 'ERROR'].includes(statusUpper)) riskReasons.push('Статус требует ручной проверки');
     if (!isPaid && isRepeatClient) riskReasons.push('Повторный клиент ждет подтверждения');
+    if (statusUpper === 'PAYMENT_FAILED') riskReasons.push('Оплата не прошла — клиент может повторить попытку');
+    const msFail = String(row.moysklad_sync_status || '').trim().toLowerCase();
+    if (msFail === 'moysklad_failed') {
+        const hint = String(row.moysklad_sync_error || '').trim();
+        riskReasons.push(hint ? `МойСклад: ${hint.slice(0, 120)}` : 'Синхронизация с МойСклад не выполнена');
+    }
 
     let attentionLevel = 'normal';
     if ((!isPaid && isUrgent) || (!isPaid && isLargeOrder)) {

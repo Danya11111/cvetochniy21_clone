@@ -6,15 +6,10 @@ function normalizePermissions(perms) {
     return perms.map(String).filter(Boolean);
 }
 
-function createAdminAuth({ config, logger = console } = {}) {
-    const trustedTgIds = new Set(
-        [...(config.ADMIN_TELEGRAM_IDS || []), ...(config.TELEGRAM_ADMIN_IDS || [])].map(String).filter(Boolean)
-    );
-    const primaryTgId = String(config.ADMIN_PRIMARY_TELEGRAM_ID || '').trim();
+function createAdminAuth({ config, adminUsersService, logger = console } = {}) {
     const classifyMatch = config.classifyAdminTelegramMatchSource;
     const maxAgeSec = Number(config.ADMIN_INITDATA_MAX_AGE_SEC || 86400);
     const botToken = String(config.TELEGRAM_BOT_TOKEN || '').trim();
-    if (primaryTgId) trustedTgIds.add(primaryTgId);
 
     function timingSafeEqualHex(a, b) {
         const left = Buffer.from(String(a || ''), 'utf8');
@@ -63,30 +58,8 @@ function createAdminAuth({ config, logger = console } = {}) {
         return { ok: true, telegramId, user, initDataRaw: raw };
     }
 
-    function resolveByTelegramIdentity(verified, { stage = 'resolve' } = {}) {
-        if (!verified?.ok) {
-            logger.warn('[AdminAccess] deny', {
-                telegramId: null,
-                matchedBy: 'none',
-                stage,
-                reason: verified?.error || 'VERIFY_FAILED'
-            });
-            return null;
-        }
+    function principalFromVerified(verified) {
         const tid = String(verified.telegramId || '').trim();
-        if (!tid) {
-            logger.warn('[AdminAccess] deny', { telegramId: null, matchedBy: 'none', stage, reason: 'NO_TELEGRAM_ID' });
-            return null;
-        }
-        if (!trustedTgIds.has(tid)) {
-            logger.warn('[AdminAccess] deny', { telegramId: tid, matchedBy: 'none', stage, reason: 'NOT_IN_ALLOWLIST' });
-            return null;
-        }
-        const matchedBy = typeof classifyMatch === 'function' ? classifyMatch(tid) : 'default';
-        const quietAllow = String(stage || '').includes('/api/admin/access');
-        if (!quietAllow) {
-            logger.log('[AdminAccess] allow', { telegramId: tid, matchedBy, stage });
-        }
         return {
             adminId: `tg:${tid}`,
             name: String(verified.user?.first_name || verified.user?.username || `Telegram ${tid}`),
@@ -97,22 +70,44 @@ function createAdminAuth({ config, logger = console } = {}) {
         };
     }
 
-    /** После проверки stateless signed token — повторная валидация initData и админской роли. */
-    function resolveFromInitDataRaw(initDataRaw) {
+    async function finalizeAllowedPrincipal(verified, { stage = 'resolve' } = {}) {
+        if (!verified?.ok) {
+            logger.warn('[AdminAccess] deny', {
+                telegramId: null,
+                matchedBy: 'none',
+                stage,
+                reason: verified?.error || 'VERIFY_FAILED'
+            });
+            return null;
+        }
+        const tid = String(verified.telegramId || '').trim();
+        const allowedFn = adminUsersService && typeof adminUsersService.isAllowedTelegramId === 'function';
+        const allowed = allowedFn ? await adminUsersService.isAllowedTelegramId(tid) : false;
+        if (!allowed) {
+            logger.warn('[AdminAccess] deny', { telegramId: tid, matchedBy: 'none', stage, reason: 'NOT_IN_ADMIN_DB' });
+            return null;
+        }
+        const matchedBy = typeof classifyMatch === 'function' ? classifyMatch(tid) : 'db';
+        const quietAllow = String(stage || '').includes('/api/admin/access');
+        if (!quietAllow) {
+            logger.log('[AdminAccess] allow', { telegramId: tid, matchedBy, stage });
+        }
+        return principalFromVerified(verified);
+    }
+
+    /** После проверки signed token (/admin-embed): initData корректен и пользователь в admin_users или владелец. */
+    async function resolveFromInitDataRaw(initDataRaw) {
         const verified = verifyInitData(initDataRaw);
-        const principal = resolveByTelegramIdentity(verified, { stage: 'embed_token' });
+        const principal = await finalizeAllowedPrincipal(verified, { stage: 'embed_token' });
         if (!principal) {
-            return { ok: false, error: verified.error || 'ADMIN_UNAUTHORIZED' };
+            return { ok: false, error: verified?.error || 'ADMIN_UNAUTHORIZED' };
         }
         return { ok: true, principal, initDataRaw: principal.initDataRaw };
     }
 
-    /**
-     * API / handoff: только заголовок или query tgWebAppData (без cookie и без in-memory h).
-     */
-    function resolveAdminFromRequest(req) {
+    /** API: заголовок x-telegram-init-data или tgWebAppData в query */
+    async function resolveAdminFromRequest(req) {
         const initDataRaw = String(req.headers['x-telegram-init-data'] || req.query.tgWebAppData || '').trim();
-
         const verified = verifyInitData(initDataRaw);
         const stage = String(req.path || req.url || 'api_admin').slice(0, 120);
         const stageLabel = `request:${stage}`;
@@ -123,31 +118,29 @@ function createAdminAuth({ config, logger = console } = {}) {
                 stage: stageLabel,
                 reason: verified?.error || 'VERIFY_FAILED'
             });
-            return {
-                ok: false,
-                error: verified.error || 'ADMIN_UNAUTHORIZED'
-            };
+            return { ok: false, error: verified.error || 'ADMIN_UNAUTHORIZED' };
         }
-        const principal = resolveByTelegramIdentity(verified, { stage: stageLabel });
+        const principal = await finalizeAllowedPrincipal(verified, { stage: stageLabel });
         if (!principal) {
-            return {
-                ok: false,
-                error: verified.error || 'ADMIN_UNAUTHORIZED'
-            };
+            return { ok: false, error: 'ADMIN_UNAUTHORIZED' };
         }
-
         return { ok: true, principal, initDataRaw: principal.initDataRaw };
     }
 
     function requireAdmin(req, res, next) {
-        const resolved = resolveAdminFromRequest(req);
-        const principal = resolved.principal;
-
-        if (!principal) {
-            return res.status(401).json({ ok: false, error: 'ADMIN_UNAUTHORIZED' });
-        }
-        req.admin = principal;
-        next();
+        resolveAdminFromRequest(req)
+            .then((resolved) => {
+                const principal = resolved.principal;
+                if (!principal) {
+                    return res.status(401).json({ ok: false, error: resolved.error || 'ADMIN_UNAUTHORIZED' });
+                }
+                req.admin = principal;
+                next();
+            })
+            .catch((e) => {
+                logger.error('[AdminAuth] requireAdmin failed:', e.message || e);
+                res.status(500).json({ ok: false, error: 'ADMIN_AUTH_FAILED' });
+            });
     }
 
     function requirePermission(permission) {
@@ -168,7 +161,8 @@ function createAdminAuth({ config, logger = console } = {}) {
         requireAdmin,
         requirePermission,
         resolveAdminFromRequest,
-        resolveFromInitDataRaw
+        resolveFromInitDataRaw,
+        verifyInitData
     };
 }
 

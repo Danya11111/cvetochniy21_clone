@@ -11,6 +11,8 @@ function inferMetaTypeByHref(href) {
     if (h.includes('/entity/saleschannel/')) return 'saleschannel';
     if (h.includes('/entity/organization/')) return 'organization';
     if (h.includes('/entity/counterparty/')) return 'counterparty';
+    if (h.includes('/entity/store/')) return 'store';
+    if (h.includes('/entity/project/')) return 'project';
     if (h.includes('/entity/product/')) return 'product';
     if (h.includes('/entity/variant/')) return 'variant';
     if (h.includes('/entity/service/')) return 'service';

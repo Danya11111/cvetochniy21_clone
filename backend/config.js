@@ -25,8 +25,22 @@ function envList(name, fallback = []) {
         .filter(Boolean);
 }
 
-/** Полный доступ к admin Mini App, POST /admin-launch, GET /admin-embed, /api/admin (см. admin-auth). */
-const DEFAULT_ADMIN_TELEGRAM_IDS = ['67460775', '659921032'];
+/** Доступ к admin Mini App после bootstrap: ADMIN_TELEGRAM_IDS (env) + только владелец в коде как safety net. */
+const DEFAULT_ADMIN_TELEGRAM_IDS = ['67460775'];
+
+function parseOptionalPublicUrl(primaryName, fallbackName) {
+    const a = String(process.env[primaryName] || '').trim().replace(/\/+$/, '');
+    const b = String(process.env[fallbackName] || '').trim().replace(/\/+$/, '');
+    return a || b || '';
+}
+
+/** Публичный HTTPS origin без завершающего слэша: webhook/редиректы Т-Банка, абсолютные ссылки. */
+const APP_PUBLIC_URL = parseOptionalPublicUrl('APP_PUBLIC_URL', 'BASE_URL');
+
+/**
+ * Начальный bootstrap списка admin_users (только при пустой таблице). Источник истины дальше — БД.
+ */
+const ADMIN_INITIAL_TG_IDS_LIST = envList('ADMIN_INITIAL_TG_IDS', []);
 
 /**
  * CSV из env (только если ключ задан непустым) + дефолтные ID (union).
@@ -86,8 +100,10 @@ function createAdminTelegramMatchClassifier(defaults, primaryTelegramId) {
 
 const path = require('path');
 
-/** Единое значение primary admin для classifier и поля ADMIN_PRIMARY_TELEGRAM_ID */
-const RESOLVED_ADMIN_PRIMARY_TELEGRAM_ID = env('ADMIN_PRIMARY_TELEGRAM_ID', '67460775');
+/** Владелец админки: ADMIN_OWNER_TG_ID приоритетнее legacy ADMIN_PRIMARY_TELEGRAM_ID */
+const RESOLVED_ADMIN_PRIMARY_TELEGRAM_ID = String(
+    env('ADMIN_OWNER_TG_ID', '') || env('ADMIN_PRIMARY_TELEGRAM_ID', '67460775')
+).trim();
 
 /**
  * TELEGRAM_PROXY_URL: не задан / пусто / direct|none|off|false|0 → прямой HTTPS к api.telegram.org.
@@ -111,11 +127,13 @@ const BROADCAST_DELIVERY_INTERVAL_MS_RESOLVED = envInt('BROADCAST_DELIVERY_INTER
  * TELEGRAM_ADMIN_CHAT_ID — алиас к TELEGRAM_FORUM_GROUP_ID (последний с тем же смыслом, что в заданиях на миграцию).
  */
 function resolveTelegramForumGroupId() {
+    const z = String(process.env.TELEGRAM_SUPERGROUP_ID || '').trim();
+    if (z) return z;
     const a = String(process.env.TELEGRAM_FORUM_GROUP_ID || '').trim();
     if (a) return a;
     const b = String(process.env.TELEGRAM_ADMIN_CHAT_ID || '').trim();
     if (b) return b;
-    return '-1003847910699';
+    return '';
 }
 
 function resolveThreadId(primaryKey, aliasKey, defaultNum) {
@@ -124,8 +142,28 @@ function resolveThreadId(primaryKey, aliasKey, defaultNum) {
     return defaultNum;
 }
 
+/** Первый заданный ключ из списка даёт thread_id; иначе fallback. */
+function resolveThreadFromEnv(keys, fallbackNum) {
+    const ks = Array.isArray(keys) ? keys : [];
+    for (const k of ks) {
+        if (String(process.env[k] || '').trim() !== '') return envInt(k, fallbackNum);
+    }
+    return fallbackNum;
+}
+
 /* Списоковые алиасы thread (см. resolveThreadId) — explicit process.env.* для discoverability / verify:manifest */
 if (0) {
+    void process.env.APP_PUBLIC_URL;
+    void process.env.TELEGRAM_SUPERGROUP_ID;
+    void process.env.TELEGRAM_TOPIC_ORDERS_ID;
+    void process.env.TELEGRAM_TOPIC_ERRORS_ID;
+    void process.env.TELEGRAM_TOPIC_ABANDONED_CARTS_ID;
+    void process.env.TELEGRAM_BROADCAST_TOPIC_CHAT_ID;
+    void process.env.TELEGRAM_BROADCAST_TOPIC_THREAD_ID;
+    void process.env.TELEGRAM_ORDERS_NOTIFY_CHAT_ID;
+    void process.env.TELEGRAM_ORDERS_NOTIFY_THREAD_ID;
+    void process.env.TELEGRAM_SUPPORT_NOTIFY_CHAT_ID;
+    void process.env.TELEGRAM_SUPPORT_NOTIFY_THREAD_ID;
     void process.env.TELEGRAM_ORDERS_THREAD_ID;
     void process.env.TELEGRAM_BROADCASTS_THREAD_ID;
     void process.env.TELEGRAM_SUPPORT_THREAD_ID;
@@ -152,6 +190,10 @@ module.exports = {
     /** true: при отсутствии канала «Telegram Bot» выполнить POST /entity/saleschannel (ломалось 412 без type в МС). По умолчанию false — заказ без salesChannel. */
     MOYSKLAD_SALESCHANNEL_AUTO_CREATE: envBool('MOYSKLAD_SALESCHANNEL_AUTO_CREATE', false),
     MOYSKLAD_ACCOUNT_ID: env('MOYSKLAD_ACCOUNT_ID', 'your_moysklad_account_id_here'),
+    MOYSKLAD_ORGANIZATION_HREF: String(env('MOYSKLAD_ORGANIZATION_HREF', '')).trim(),
+    MOYSKLAD_STORE_HREF: String(env('MOYSKLAD_STORE_HREF', '')).trim(),
+    MOYSKLAD_AGENT_HREF: String(env('MOYSKLAD_AGENT_HREF', '')).trim(),
+    MOYSKLAD_PROJECT_HREF: String(env('MOYSKLAD_PROJECT_HREF', '')).trim(),
     MOYSKLAD_ORGANIZATION_NAME: env('MOYSKLAD_ORGANIZATION_NAME', 'ИП Зайламова Анна Геннадьевна'),
     MOYSKLAD_DEFAULT_AGENT_ID: env('MOYSKLAD_DEFAULT_AGENT_ID', 'ID_КОНТРАГЕНТА_ДЛЯ_ЗАКАЗОВ'),
     MOYSKLAD_DELIVERY_CITY400_ASSORTMENT: env('MOYSKLAD_DELIVERY_CITY400_ASSORTMENT', 'mS3C4yVOihrURel027ui11'),
@@ -159,7 +201,10 @@ module.exports = {
 
     TBANK_TERMINAL_KEY: env('TBANK_TERMINAL_KEY', ''),
     TBANK_PASSWORD: env('TBANK_PASSWORD', ''),
-    BASE_URL: env('BASE_URL', 'https://tgtsvetochnii21.ru'),
+    TBANK_API_URL: String(env('TBANK_API_URL', 'https://securepay.tinkoff.ru/v2')).trim().replace(/\/+$/, ''),
+    APP_PUBLIC_URL,
+    /** @deprecated используйте APP_PUBLIC_URL — оставлено для совместимости; должно совпадать с публичным origin */
+    BASE_URL: APP_PUBLIC_URL || env('BASE_URL', ''),
     /** URL Mini App для кнопки Web App в /start; пусто = BASE_URL */
     MINI_APP_URL: env('MINI_APP_URL', ''),
     /** @username бота без @ — опционально (маркетинговые ссылки и т.п.); кнопка «Позвать менеджера» использует callback, не URL. */
@@ -230,13 +275,17 @@ module.exports = {
         4
     ),
     TELEGRAM_SUPPORT_NOTIFY_CHAT_ID: resolveTelegramPerPurposeChatId('TELEGRAM_SUPPORT_NOTIFY_CHAT_ID'),
-    TELEGRAM_SUPPORT_NOTIFY_THREAD_ID: resolveThreadId(
-        'TELEGRAM_SUPPORT_NOTIFY_THREAD_ID',
-        'TELEGRAM_SUPPORT_THREAD_ID',
+    TELEGRAM_SUPPORT_NOTIFY_THREAD_ID: resolveThreadFromEnv(
+        ['TELEGRAM_TOPIC_ERRORS_ID', 'TELEGRAM_SUPPORT_NOTIFY_THREAD_ID', 'TELEGRAM_SUPPORT_THREAD_ID'],
         6
     ),
     TELEGRAM_ORDERS_NOTIFY_CHAT_ID: resolveTelegramPerPurposeChatId('TELEGRAM_ORDERS_NOTIFY_CHAT_ID'),
-    TELEGRAM_ORDERS_NOTIFY_THREAD_ID: resolveThreadId('TELEGRAM_ORDERS_NOTIFY_THREAD_ID', 'TELEGRAM_ORDERS_THREAD_ID', 2),
+    TELEGRAM_ORDERS_NOTIFY_THREAD_ID: resolveThreadFromEnv(
+        ['TELEGRAM_TOPIC_ORDERS_ID', 'TELEGRAM_ORDERS_NOTIFY_THREAD_ID', 'TELEGRAM_ORDERS_THREAD_ID'],
+        2
+    ),
+    /** Зарезервировано под сервисные уведомления (пока не используется в коде отправки). */
+    TELEGRAM_TOPIC_ABANDONED_CARTS_ID: envInt('TELEGRAM_TOPIC_ABANDONED_CARTS_ID', 0),
 
     BROADCAST_TOPIC_TEST_MODE: envBool('BROADCAST_TOPIC_TEST_MODE', true),
     BROADCAST_TOPIC_TEST_TELEGRAM_IDS: envList('BROADCAST_TOPIC_TEST_TELEGRAM_IDS', ['67460775', '659921032']),
@@ -278,6 +327,8 @@ module.exports = {
     BROADCAST_PAUSED_TRANSPORT_SWEEP_MS: envInt('BROADCAST_PAUSED_TRANSPORT_SWEEP_MS', 45_000),
 
     ADMIN_PRIMARY_TELEGRAM_ID: RESOLVED_ADMIN_PRIMARY_TELEGRAM_ID,
+    ADMIN_OWNER_TG_ID: RESOLVED_ADMIN_PRIMARY_TELEGRAM_ID,
+    ADMIN_INITIAL_TG_IDS_LIST,
     ADMIN_PRIMARY_USERNAME: env('ADMIN_PRIMARY_USERNAME', 'arhi_pov'),
     ADMIN_PRIMARY_FIRST_NAME: env('ADMIN_PRIMARY_FIRST_NAME', 'Даня'),
     ADMIN_PRIMARY_LAST_NAME: env('ADMIN_PRIMARY_LAST_NAME', 'Архипов'),

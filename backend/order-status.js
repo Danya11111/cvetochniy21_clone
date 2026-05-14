@@ -8,6 +8,8 @@
 const PAID_CONFIRMED = new Set(['PAID', 'COMPLETED', 'DELIVERED']);
 const PAYMENT_AWAIT = new Set(['PENDING_PAYMENT']);
 const PAYMENT_AUTHORIZED = new Set(['AUTHORIZED']);
+const PAYMENT_FAILED = new Set(['PAYMENT_FAILED']);
+/** legacy: ранее отмена оплаты мапилась в CANCELLED */
 const CANCELLED_LIKE = new Set(['CANCELLED', 'CANCELED', 'FAILED', 'ERROR']);
 
 function hasRecordedPayment(row) {
@@ -44,6 +46,14 @@ function deriveOrderAdminPresentation(row) {
     if (PAYMENT_AUTHORIZED.has(u)) {
         return { status_code: 'authorized', status_label: 'Оплата авторизована', status_tone: 'info', status_raw: raw };
     }
+    if (PAYMENT_FAILED.has(u)) {
+        return {
+            status_code: 'payment_failed',
+            status_label: 'Оплата не прошла',
+            status_tone: 'alert',
+            status_raw: raw
+        };
+    }
     if (CANCELLED_LIKE.has(u) || u.includes('CANCEL')) {
         return { status_code: 'cancelled', status_label: 'Отменён / ошибка', status_tone: 'alert', status_raw: raw };
     }
@@ -59,7 +69,12 @@ function deriveOrderAdminPresentation(row) {
 }
 
 const PAID_SQL = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
-const CANCELLED_SQL = `(UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR') OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%')`;
+const PAYMENT_FAILED_SQL = `UPPER(TRIM(COALESCE(o.status,''))) = 'PAYMENT_FAILED'`;
+/** Отменённые / legacy-ошибки — без PAYMENT_FAILED (отдельный фильтр `payment_failed`). */
+const CANCELLED_SQL = `(
+    UPPER(TRIM(COALESCE(o.status,''))) IN ('CANCELLED','CANCELED','FAILED','ERROR')
+    OR UPPER(COALESCE(o.status,'')) LIKE '%CANCEL%'
+)`;
 
 /**
  * Фильтр списка заказов в админке по каноническому status_code (предпочтительно) или legacy status.
@@ -78,12 +93,15 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
             return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'AUTHORIZED'`, args: [] };
         }
         if (c === 'cancelled') return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
+        if (c === 'payment_failed') {
+            return { clause: `WHERE ${PAYMENT_FAILED_SQL}`, args: [] };
+        }
         if (c === 'unpaid') {
             return { clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL})`, args: [] };
         }
         if (c === 'fulfillment_external') {
             return {
-                clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL}) AND UPPER(TRIM(COALESCE(o.status,''))) NOT IN ('PENDING_PAYMENT','AUTHORIZED')`,
+                clause: `WHERE NOT (${PAID_SQL}) AND NOT (${CANCELLED_SQL}) AND NOT (${PAYMENT_FAILED_SQL}) AND UPPER(TRIM(COALESCE(o.status,''))) NOT IN ('PENDING_PAYMENT','AUTHORIZED')`,
                 args: []
             };
         }
@@ -98,6 +116,9 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
     }
     if (lu === 'AUTHORIZED') {
         return { clause: `WHERE UPPER(TRIM(COALESCE(o.status,''))) = 'AUTHORIZED'`, args: [] };
+    }
+    if (lu === 'PAYMENT_FAILED') {
+        return { clause: `WHERE ${PAYMENT_FAILED_SQL}`, args: [] };
     }
     if (['CANCELLED', 'CANCELED', 'FAILED', 'ERROR'].includes(lu) || lu.includes('CANCEL')) {
         return { clause: `WHERE ${CANCELLED_SQL}`, args: [] };
@@ -114,5 +135,6 @@ module.exports = {
     buildOrdersListWhereClause,
     PAID_CONFIRMED,
     PAYMENT_AWAIT,
-    PAYMENT_AUTHORIZED
+    PAYMENT_AUTHORIZED,
+    PAYMENT_FAILED
 };

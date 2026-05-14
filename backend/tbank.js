@@ -1,38 +1,35 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./db');
-const { TBANK_TERMINAL_KEY, TBANK_PASSWORD, BASE_URL } = require('./config');
+const { TBANK_TERMINAL_KEY, TBANK_PASSWORD, APP_PUBLIC_URL, BASE_URL, TBANK_API_URL } = require('./config');
 const {
     buildMoySkladOrderPayloadFromDbRow,
     countCartLinesMissingMsId
 } = require('./checkout-moysklad-order');
 
-const TBANK_API_URL = 'https://securepay.tinkoff.ru'; // боевой URL
+/** Публичный origin без завершающего `/` — prefer APP_PUBLIC_URL, fallback BASE_URL legacy */
+function resolvedPublicOrigin() {
+    const raw = String(APP_PUBLIC_URL || BASE_URL || '').trim().replace(/\/+$/, '');
+    return raw;
+}
 
-// Формирование токена согласно доке Т-Банка (TerminalKey + Password + параметры) :contentReference[oaicite:1]{index=1}
+// Формирование токена согласно доке Т-Банка (TerminalKey + Password + параметры)
 function buildToken(params) {
-    // Копируем все поля верхнего уровня
     const data = { ...params };
 
-    // По правилам Т-Банка из токена исключаются Token и Receipt
     delete data.Token;
     delete data.Receipt;
 
-    // Добавляем пароль
     data.Password = TBANK_PASSWORD;
 
-    const entries = Object.entries(data)
-        .filter(([, v]) => v !== undefined && v !== null);
+    const entries = Object.entries(data).filter(([, v]) => v !== undefined && v !== null);
 
-    // Сортируем по имени параметра
     entries.sort(([a], [b]) => a.localeCompare(b));
 
-    // Конкатенируем только значения
     const concat = entries.map(([, v]) => String(v)).join('');
 
     return crypto.createHash('sha256').update(concat, 'utf8').digest('hex');
 }
-
 
 function dbRun(sql, params = []) {
     return new Promise((resolve, reject) => {
@@ -49,7 +46,6 @@ function dbGet(sql, params = []) {
     });
 }
 
-// 1) разворачиваем quantity в Quantity=1, чтобы скидку распределять корректно
 function buildReceiptItemsExpanded(orderItems, deliveryFeeRub) {
     const out = [];
 
@@ -74,7 +70,6 @@ function buildReceiptItemsExpanded(orderItems, deliveryFeeRub) {
     const feeK = Math.round(feeRub * 100);
 
     if (Number.isFinite(feeK) && feeK > 0) {
-        // доставка как отдельная услуга, qty=1 (чтобы скидка распределялась корректно)
         out.push({
             Name: 'Доставка',
             Price: feeK,
@@ -89,7 +84,6 @@ function buildReceiptItemsExpanded(orderItems, deliveryFeeRub) {
     return out;
 }
 
-// 2) распределяем скидку (бонусы) по позициям (Quantity=1 → легко)
 function applyDiscountToReceiptItems(items, discountKopecks) {
     if (!discountKopecks || discountKopecks <= 0) return items;
 
@@ -98,8 +92,6 @@ function applyDiscountToReceiptItems(items, discountKopecks) {
 
     let remaining = discountKopecks;
 
-    // распределяем по 1 копейке с конца (чтобы гарантированно уложиться)
-    // сначала пропорционально
     const discounted = items.map(it => ({ ...it }));
 
     for (let i = 0; i < discounted.length; i++) {
@@ -109,12 +101,11 @@ function applyDiscountToReceiptItems(items, discountKopecks) {
         const share = Math.floor((it.Amount * discountKopecks) / total);
         const use = Math.min(remaining, share);
 
-        it.Price = Math.max(0, it.Price - use);   // qty=1
+        it.Price = Math.max(0, it.Price - use);
         it.Amount = it.Price;
         remaining -= use;
     }
 
-    // добиваем остаток скидки по 1 копейке с конца
     for (let i = discounted.length - 1; i >= 0 && remaining > 0; i--) {
         const it = discounted[i];
         if (it.Price <= 0) continue;
@@ -137,13 +128,16 @@ async function initPaymentForOrder(order) {
         throw new Error('TBANK_TERMINAL_KEY or TBANK_PASSWORD is not set');
     }
 
-    // 1) Базовые позиции для чека (ТОВАРЫ + ДОСТАВКА)
+    const publicBase = resolvedPublicOrigin();
+    if (!publicBase) {
+        console.error('[T-Bank] APP_PUBLIC_URL/BASE_URL is empty — SuccessURL/FailURL/NotificationURL may be invalid');
+    }
+
     let receiptItems = buildReceiptItemsExpanded(order.items || [], order.deliveryFeeRub);
 
     const totalBeforeK = receiptItems.reduce((sum, it) => sum + (it.Amount || 0), 0);
     const bonusesUsedK = Math.max(0, Number(order.bonusesUsedK || 0));
 
-    // 2) Amount = totalPaidK (которую сервер уже посчитал: товары+доставка-бонусы)
     const amountKopecks = Number.isFinite(Number(order.totalPaidK))
         ? Math.max(0, Number(order.totalPaidK))
         : Math.max(0, totalBeforeK - bonusesUsedK);
@@ -152,14 +146,12 @@ async function initPaymentForOrder(order) {
         throw new Error('Cannot init payment with zero amount');
     }
 
-    // 3) Если применялись бонусы — уменьшаем позиции в чеке так, чтобы сумма Items == Amount
     const discountK = Math.max(0, totalBeforeK - amountKopecks);
 
     if (discountK > 0) {
         receiptItems = applyDiscountToReceiptItems(receiptItems, discountK);
     }
 
-    // контроль: сумма позиций должна совпасть с Amount
     const itemsSum = receiptItems.reduce((sum, it) => sum + it.Amount, 0);
     if (itemsSum !== amountKopecks) {
         const diff = amountKopecks - itemsSum;
@@ -185,19 +177,31 @@ async function initPaymentForOrder(order) {
         OrderId: bankOrderId,
         Description: `Заказ #${order.id} в Telegram-магазине`,
         Receipt: receipt,
-        NotificationURL: `${BASE_URL}/api/tbank/notify`
+        NotificationURL: publicBase ? `${publicBase}/api/tbank/notify` : '/api/tbank/notify'
     };
+
+    if (publicBase) {
+        payload.SuccessURL = `${publicBase}/?payment=success`;
+        payload.FailURL = `${publicBase}/?payment=fail`;
+    }
 
     payload.Token = buildToken(payload);
 
-    const res = await axios.post(`${TBANK_API_URL}/v2/Init`, payload, {
+    const initUrl = `${String(TBANK_API_URL || '').replace(/\/+$/, '')}/Init`;
+    const res = await axios.post(initUrl, payload, {
         headers: { 'Content-Type': 'application/json' }
     });
 
     console.log('[T-Bank Init] response:', JSON.stringify(res.data, null, 2));
 
     if (!res.data.Success) {
-        throw new Error(`T-Bank Init error: ${res.data.ErrorCode} ${res.data.Message || ''}`);
+        const msg = `${res.data.ErrorCode || ''} ${res.data.Message || ''}`.trim();
+        console.error('[T-Bank Init] failed', {
+            orderId: order.id,
+            amountKopecks,
+            error: msg
+        });
+        throw new Error(`T-Bank Init error: ${msg}`);
     }
 
     const { PaymentId, PaymentURL, Status } = res.data;
@@ -229,7 +233,6 @@ async function initPaymentForOrder(order) {
     return { paymentId: PaymentId, paymentUrl: PaymentURL };
 }
 
-
 /**
  * Обработка webhook от Т-Банка (NotificationURL)
  * body — JSON, который прислал банк
@@ -240,9 +243,8 @@ async function handleNotification(
     sendTelegramBotMessage,
     sendTelegramForumMessage,
     forumGroupId,
-    onPaid // <-- новый аргумент
+    onPaid
 ) {
-    // 1) Проверяем подпись
     const { Token: receivedToken, ...rest } = body;
     const expectedToken = buildToken(rest);
 
@@ -250,11 +252,19 @@ async function handleNotification(
         throw new Error('Invalid T-Bank notification token');
     }
 
-    const { PaymentId, Status } = body;
+    const { PaymentId, Status, ErrorCode, Message, Details } = body;
 
-    console.log('[T-Bank Notify] PaymentId:', PaymentId, 'Status:', Status);
+    console.log(
+        '[T-Bank Notify] PaymentId:',
+        PaymentId,
+        'Status:',
+        Status,
+        'ErrorCode:',
+        ErrorCode || '',
+        'Message:',
+        Message || ''
+    );
 
-    // 2) Обновляем payment
     await new Promise((resolve, reject) => {
         db.run(
             'UPDATE payments SET status = ?, raw_json = ? WHERE payment_id = ?',
@@ -263,7 +273,6 @@ async function handleNotification(
         );
     });
 
-    // 3) Находим локальный заказ по payment_id
     const paymentRow = await new Promise((resolve, reject) => {
         db.get(
             'SELECT order_id, amount FROM payments WHERE payment_id = ?',
@@ -292,7 +301,21 @@ async function handleNotification(
     }
 
     if (Status === 'CONFIRMED') {
-        // 1) отмечаем как оплаченный локально
+        const existing = await dbGet(
+            `SELECT status, paid_user_msg_sent, ms_paymentin_created FROM orders WHERE id = ?`,
+            [localOrderId]
+        );
+        const alreadyPaid =
+            existing && String(existing.status || '').trim().toUpperCase() === 'PAID';
+
+        if (alreadyPaid) {
+            console.log('[T-Bank] idempotent CONFIRMED webhook: order already PAID', {
+                orderId: localOrderId,
+                paymentId: String(PaymentId || '')
+            });
+            return { ok: true, duplicate: true };
+        }
+
         await new Promise((resolve, reject) => {
             db.run(
                 'UPDATE orders SET status = ? WHERE id = ?',
@@ -301,7 +324,6 @@ async function handleNotification(
             );
         });
 
-        // 2) грузим заказ
         const orderRow = await new Promise((resolve, reject) => {
             db.get(
                 'SELECT * FROM orders WHERE id = ?',
@@ -310,8 +332,6 @@ async function handleNotification(
             );
         });
 
-        // 3) создаём оплату/обновляем МС (PaymentIn + статус)
-        //    (ты уже защищаешься флагом ms_paymentin_created)
         if (orderRow && sendOrderToMoySklad) {
             const alreadyCreated = Number(orderRow.ms_paymentin_created || 0) === 1;
 
@@ -362,15 +382,10 @@ async function handleNotification(
                         })
                     );
 
-                    // фиксируем, что PaymentIn создан — чтобы не удваивать
-                    await new Promise((resolve, reject) => {
-                        db.run(
-                            'UPDATE orders SET ms_paymentin_created = 1 WHERE id = ?',
-                            [localOrderId],
-                            err => (err ? reject(err) : resolve())
-                        );
-                    });
-
+                    await dbRun(
+                        'UPDATE orders SET ms_paymentin_created = 1, moysklad_sync_status = ?, moysklad_sync_error = NULL WHERE id = ?',
+                        ['moysklad_synced', localOrderId]
+                    );
                 } catch (e) {
                     console.error(
                         '[TBank] moysklad_post_payment_sync_failed',
@@ -386,43 +401,21 @@ async function handleNotification(
                             response: e && e.response && e.response.data ? e.response.data : undefined
                         })
                     );
-                    // флаг не ставим — можно повторить позже
+                    const reason = `${e && e.message ? e.message : String(e)}`.slice(0, 900);
+                    try {
+                        await dbRun(
+                            'UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = ? WHERE id = ?',
+                            ['moysklad_failed', reason, localOrderId]
+                        );
+                    } catch (_) {
+                        /**/
+                    }
                 }
             } else {
                 console.log('[T-Bank] PaymentIn already created for order', localOrderId, 'skip');
             }
         }
 
-        // 4) сообщение в топик супергруппы "оплатил" (если есть groupId + topic_id)
-        // try {
-        //     if (forumGroupId && sendTelegramForumMessage && orderRow) {
-        //         const userRow = await new Promise((resolve, reject) => {
-        //             db.get(
-        //                 'SELECT first_name, last_name, topic_id FROM users WHERE telegram_id = ?',
-        //                 [orderRow.telegram_id],
-        //                 (err, row) => (err ? reject(err) : resolve(row))
-        //             );
-        //         });
-        //
-        //         const topicId = Number(userRow?.topic_id || 0);
-        //         if (topicId > 0) {
-        //             const NAME =
-        //                 `${String(userRow?.first_name || '').trim()} ${String(userRow?.last_name || '').trim()}`.trim() ||
-        //                 'Клиент';
-        //             const ID = String(orderRow.telegram_id);
-        //
-        //             await sendTelegramForumMessage(
-        //                 forumGroupId,
-        //                 topicId,
-        //                 `Я к тебе с радостными новостями 🟢\n\nКлиент ${NAME}, ${ID}, оплатил свой заказ 🥳`
-        //             );
-        //         }
-        //     }
-        // } catch (e) {
-        //     console.error('[TG] paid forum message error:', e.message || e);
-        // }
-
-// === Idempotency: user DM (1 раз на заказ) ===
         const userMsgGate = await dbRun(
             `
     UPDATE orders
@@ -434,9 +427,6 @@ async function handleNotification(
         );
         const shouldSendUserMsg = userMsgGate.changes === 1;
 
-
-        // Публикация события оплаты в внутренний event-контур.
-        // Идемпотентность дальнейшей доставки контролируется outbox dedupe.
         try {
             if (typeof onPaid === 'function' && orderRow) {
                 await onPaid({
@@ -450,8 +440,6 @@ async function handleNotification(
             console.error('[EVENT_PUBLISHER] onPaid error:', e.message || e);
         }
 
-
-        // 5) сообщение пользователю в личку (заказ # из МС + список товаров)
         if (shouldSendUserMsg) {
             try {
                 if (sendTelegramBotMessage && orderRow) {
@@ -482,18 +470,15 @@ async function handleNotification(
                         addrLower === 'самовывоз;' ||
                         address.trim().toUpperCase() === 'САМОВЫВОЗ';
 
-                    let text = `✨ Вы оформили заказ #${orderNumber}` +
-                        (lines ? `\n${lines}\n` : '\n');
+                    let text = `✨ Вы оформили заказ #${orderNumber}` + (lines ? `\n${lines}\n` : '\n');
 
                     if (isPickup) {
-                        // самовывоз — другой текст
                         text +=
                             `\nСпособ получения: Самовывоз` +
                             `\nАдрес самовывоза: улица Пирогова, 1, корп. 2` +
                             `\nСумма заказа: ${sumRub} ₽` +
                             `\n\nОжидаем Вас 🌷`;
                     } else {
-                        // доставка — как было
                         text +=
                             `\nАдрес доставки: ${address}` +
                             `\nДата доставки: ${deliveryDate}` +
@@ -502,52 +487,51 @@ async function handleNotification(
                             `\n\nОжидайте доставки 🌷`;
                     }
 
-                    text += '\n\nОставьте отзыв о нашем цветочном магазине — ваше мнение важно для нас!'
+                    text += '\n\nОставьте отзыв о нашем цветочном магазине — ваше мнение важно для нас!';
 
-                    const REVIEW_URL = 'https://yandex.ru/maps/org/tsvetochny21/136980805014/reviews/?ll=47.215033%2C56.141463&source=serp_navig&tab=reviews&z=18';
+                    const REVIEW_URL =
+                        'https://yandex.ru/maps/org/tsvetochny21/136980805014/reviews/?ll=47.215033%2C56.141463&source=serp_navig&tab=reviews&z=18';
 
                     await sendTelegramBotMessage(String(orderRow.telegram_id), text, {
                         reply_markup: {
-                            inline_keyboard: [
-                                [{ text: 'Оставить отзыв', url: REVIEW_URL }]
-                            ]
+                            inline_keyboard: [[{ text: 'Оставить отзыв', url: REVIEW_URL }]]
                         }
                     });
-
                 }
             } catch (e) {
                 console.error('[TG] post-paid user message error:', e.message || e);
 
-                await dbRun('UPDATE orders SET paid_user_msg_sent = 0 WHERE id = ?', [localOrderId]).catch(() => {
-                });
+                await dbRun('UPDATE orders SET paid_user_msg_sent = 0 WHERE id = ?', [localOrderId]).catch(() => {});
             }
         } else {
-                console.log('[T-Bank] user DM already sent for order', localOrderId);
-            }
+            console.log('[T-Bank] user DM already sent for order', localOrderId);
+        }
 
         return { ok: true };
     }
 
     if (Status === 'REJECTED' || Status === 'CANCELED') {
-        await new Promise((resolve, reject) => {
-            db.run(
-                'UPDATE orders SET status = ? WHERE id = ?',
-                ['CANCELLED', localOrderId],
-                err => (err ? reject(err) : resolve())
-            );
+        const reason = `${Status}${ErrorCode != null ? ` code=${ErrorCode}` : ''}${
+            Message ? `: ${Message}` : ''
+        }${Details ? ` details=${Details}` : ''}`;
+        console.error('[T-Bank] payment declined', {
+            orderId: localOrderId,
+            paymentId: String(PaymentId || ''),
+            reason
         });
-
+        await dbRun(`UPDATE orders SET status = ?, moysklad_sync_error = ? WHERE id = ?`, [
+            'PAYMENT_FAILED',
+            reason.slice(0, 900),
+            localOrderId
+        ]);
         return { ok: true };
     }
 
     return { ok: true };
 }
 
-
-
-
-
 module.exports = {
     initPaymentForOrder,
-    handleNotification
+    handleNotification,
+    resolvedPublicOrigin
 };

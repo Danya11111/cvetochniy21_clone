@@ -7,7 +7,8 @@ const MINI_APP_SCREEN_IDS = [
     'orders',
     'clients_new',
     'clients_all',
-    'client_card'
+    'client_card',
+    'admins'
 ];
 
 const BOTTOM_NAV_IDS = /** @type {const} */ ({ DASHBOARD: 'dashboard', PROMO: 'promo' });
@@ -23,7 +24,8 @@ const SCREEN_META = {
     orders: { title: 'Заказы', subtitle: '', nav: 'dashboard' },
     clients_new: { title: 'Новые клиенты', subtitle: '', nav: 'dashboard' },
     clients_all: { title: 'Все клиенты', subtitle: '', nav: 'dashboard' },
-    client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' }
+    client_card: { title: 'Клиент', subtitle: '', nav: 'dashboard' },
+    admins: { title: 'Администраторы', subtitle: 'Доступ в Mini App', nav: 'dashboard' }
 };
 
 /** Справка по метрикам дашборда v2 (тап для bottom-sheet на мобильных). */
@@ -169,7 +171,9 @@ const state = {
     promoFormSourceOpen: false,
     promoFormBroadcastOpen: false,
     promoFlash: '',
-    ordersV2RangeLabel: ''
+    ordersV2RangeLabel: '',
+    /** @type {string} */
+    adminsManageFlash: ''
 };
 
 function loadUiState() {
@@ -689,6 +693,11 @@ function friendlyActionError(message) {
     if (text.includes('PROMOTION_BROADCAST_PLACE_FAILED'))
         return 'Не удалось разместить рассылку. Попробуйте ещё раз или проверьте журнал ошибок.';
     if (text.includes('TELEGRAM_BOT_USERNAME_REQUIRED')) return 'Не задан username бота для ссылок. Укажите TELEGRAM_BOT_USERNAME в настройках сервера.';
+    if (text.includes('OWNER_ONLY')) return 'Это действие доступно только владельцу.';
+    if (text.includes('BAD_TELEGRAM_ID')) return 'Укажите корректный числовой Telegram ID.';
+    if (text.includes('ALREADY_ADMIN')) return 'Этот пользователь уже в списке.';
+    if (text.includes('CANNOT_REMOVE_OWNER')) return 'Владельца нельзя удалить из списка.';
+    if (text.includes('OWNER_ALREADY')) return 'Владелец уже в списке по умолчанию.';
     return 'Не удалось выполнить действие. Попробуйте снова.';
 }
 
@@ -1095,6 +1104,7 @@ function renderShell(contentHtml) {
     if (state.currentScreen === 'client_card') headerBackAction = 'client-card-back';
     else if (state.currentScreen === 'clients_new' || state.currentScreen === 'clients_all') headerBackAction = 'mini-stack-back';
     else if (state.currentScreen === 'orders') headerBackAction = 'orders-back';
+    else if (state.currentScreen === 'admins') headerBackAction = 'admins-back';
     let contextHint = '';
     if (state.currentScreen === 'orders') {
         contextHint = String(state.ordersV2RangeLabel || '').trim() || 'Заказы за период дашборда';
@@ -1317,6 +1327,16 @@ async function renderDashboardV2Screen() {
     const preset7d = state.dashboardPreset === '7d';
     const presetAll = state.dashboardPreset === 'all';
 
+    const ownerAdminPanel =
+        adminConfig && adminConfig.access && adminConfig.access.can_manage_admins
+            ? `
+            <h3 class="dashboard-v2__section-title">Доступ</h3>
+            <button type="button" class="dashboard-v2__analytics-tap" data-action="dashboard-open-admins" aria-label="Управление администраторами">
+                <span class="dashboard-v2__subhead">Администраторы Mini App</span>
+                <span class="dashboard-v2__subhead-hint" aria-hidden="true">→</span>
+            </button>`
+            : '';
+
     const uiErrBanner = state.dashboardRangeUiError
         ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn" role="alert">${esc(state.dashboardRangeUiError)}</div>`
         : '';
@@ -1393,6 +1413,7 @@ async function renderDashboardV2Screen() {
                     ${renderMiniMetricCell('Новые клиенты', formatNum(m.newClientsCount), false, '', 'dashboard-open-new-clients')}
                     ${renderMiniMetricCell('Все клиенты', formatNum(m.clientsTotalCount), false, '', 'dashboard-open-all-clients')}
                 </section>
+                ${ownerAdminPanel}
             </section>
 
             <h3 class="dashboard-v2__section-title">Клиенты и заказы</h3>
@@ -1423,6 +1444,54 @@ async function renderDashboardV2Screen() {
             </button>
             <article class="dashboard-v2__card dashboard-v2__card--muted dashboard-v2__card--sources">${sourcesBlockInner}</article>
         </div>`;
+}
+
+async function renderAdminsScreen() {
+    const allow = !!(adminConfig && adminConfig.access && adminConfig.access.can_manage_admins);
+    if (!allow) {
+        return `<div class="dashboard-v2 screen-enter"><div class="dashboard-v2__empty-soft">Раздел доступен только владельцу.</div></div>`;
+    }
+    let rows = [];
+    try {
+        const pack = await api('/api/admin/admins');
+        rows = Array.isArray(pack.data) ? pack.data : [];
+    } catch (e) {
+        return errorState(friendlyActionError(e.message) || String(e.message || ''));
+    }
+    const flash = state.adminsManageFlash
+        ? `<div class="dashboard-v2__banner dashboard-v2__banner--warn" role="status">${esc(state.adminsManageFlash)}</div>`
+        : '';
+    const list = rows.length
+        ? rows
+              .map((r) => {
+                  const id = esc(r.telegram_id);
+                  const tag = r.is_owner ? ' <span class="list-card-meta">владелец</span>' : '';
+                  const rm = r.is_owner
+                      ? ''
+                      : `<button type="button" class="secondary" data-action="admin-remove" data-id="${id}">Удалить</button>`;
+                  return `<div class="list-card-footer" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span class="mono">${id}</span>${tag}
+                    ${rm}
+                </div>`;
+              })
+              .join('')
+        : '<p class="list-card-meta">Нет записей</p>';
+    return `
+    <div class="dashboard-v2 screen-enter">
+        ${flash}
+        <p class="dashboard-v2__period-hint">Только владелец может менять список. Вход проверяется по Telegram WebApp.</p>
+        <article class="list-card">
+            <h3 class="list-card-title">Текущие администраторы</h3>
+            ${list}
+        </article>
+        <article class="list-card">
+            <h3 class="list-card-title">Добавить по Telegram ID</h3>
+            <form id="adminsAddForm" class="mini-clients-search" style="flex-direction:column;align-items:stretch;">
+                <input type="text" name="telegram_id" class="mini-clients-search__input" inputmode="numeric" pattern="[0-9]+" placeholder="Например 123456789" autocomplete="off" />
+                <button type="submit" class="mt-2">Добавить</button>
+            </form>
+        </article>
+    </div>`;
 }
 
 function formatOrderListDate(iso) {
@@ -3248,6 +3317,7 @@ async function renderScreenContent() {
     if (state.currentScreen === 'clients_all') return renderClientsAllScreen();
     if (state.currentScreen === 'client_card') return renderClientCardV2Screen();
     if (state.currentScreen === 'orders') return renderOrdersScreen();
+    if (state.currentScreen === 'admins') return renderAdminsScreen();
     return renderDashboardV2Screen();
 }
 
@@ -3296,6 +3366,29 @@ function bindForms() {
             const fd = new FormData(v2All);
             state.clientsV2AllQ = String(fd.get('q') || '').trim();
             renderApp();
+        });
+    }
+    const adm = document.getElementById('adminsAddForm');
+    if (adm) {
+        adm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const fd = new FormData(adm);
+            const tid = String(fd.get('telegram_id') || '').trim();
+            if (!/^\d+$/.test(tid)) {
+                state.adminsManageFlash = 'Нужен числовой Telegram ID.';
+                await renderApp();
+                return;
+            }
+            try {
+                await runGuardedAction('admin-add', async () => {
+                    await api('/api/admin/admins', { method: 'POST', body: JSON.stringify({ telegram_id: tid }) });
+                    state.adminsManageFlash = '';
+                    adm.reset();
+                });
+            } catch (e) {
+                state.adminsManageFlash = friendlyActionError(String(e.message || ''));
+            }
+            await renderApp();
         });
     }
 }
@@ -3443,6 +3536,30 @@ async function handleAction(action, value, eventTarget) {
     }
     if (action === 'dashboard-open-all-clients') {
         navigateTo('clients_all');
+        return;
+    }
+    if (action === 'dashboard-open-admins') {
+        state.adminsManageFlash = '';
+        navigateTo('admins');
+        return;
+    }
+    if (action === 'admins-back') {
+        navigateTo('dashboard');
+        return;
+    }
+    if (action === 'admin-remove') {
+        const tid =
+            eventTarget && eventTarget.getAttribute ? String(eventTarget.getAttribute('data-id') || '').trim() : '';
+        if (!tid) return;
+        await runGuardedAction(`admin-remove-${tid}`, async () => {
+            try {
+                await api(`/api/admin/admins/${encodeURIComponent(tid)}`, { method: 'DELETE' });
+                state.adminsManageFlash = '';
+            } catch (e) {
+                state.adminsManageFlash = friendlyActionError(String(e.message || ''));
+            }
+            await renderApp();
+        });
         return;
     }
     if (action === 'open-client-v2-card') {

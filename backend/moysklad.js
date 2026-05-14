@@ -1,6 +1,7 @@
 const axios = require('axios');
 const db = require('./db');
 const {
+    inferMetaTypeByHref,
     isValidMeta,
     fixMeta,
     metaOrNull,
@@ -25,6 +26,10 @@ const {
 const {
     MOYSKLAD_TOKEN,
     MOYSKLAD_ORGANIZATION_NAME,
+    MOYSKLAD_ORGANIZATION_HREF,
+    MOYSKLAD_STORE_HREF,
+    MOYSKLAD_AGENT_HREF,
+    MOYSKLAD_PROJECT_HREF,
     MOYSKLAD_ROOT_FOLDER_NAME,
     MOYSKLAD_ROOT_FOLDER_EXTERNAL_CODE,
     MOYSKLAD_SALESCHANNEL_AUTO_CREATE
@@ -48,6 +53,21 @@ const ms = axios.create({
         Accept: 'application/json;charset=utf-8'
     }
 });
+
+function updateOrderMoyskladSyncLocal(orderId, status, errorText = null) {
+    db.run(
+        `UPDATE orders SET moysklad_sync_status = ?, moysklad_sync_error = ? WHERE id = ?`,
+        [
+            String(status || '').trim(),
+            errorText != null ? String(errorText || '').slice(0, 900) : null,
+            orderId
+        ],
+        err => {
+            if (err)
+                console.error('[MoySklad] Cannot save moysklad_sync_* for order', orderId, err.message);
+        }
+    );
+}
 
 function dropInvalidMeta(obj) {
     // верхний уровень
@@ -379,6 +399,15 @@ async function debugGetCustomerOrderFullByLocalOrderId(localOrderId) {
 
 
 async function getOrganizationMeta(opts = null) {
+    const hrefConfigured = String(MOYSKLAD_ORGANIZATION_HREF || '').trim();
+    if (hrefConfigured) {
+        return fixMeta({
+            href: hrefConfigured,
+            type: inferMetaTypeByHref(hrefConfigured) || 'organization',
+            mediaType: 'application/json'
+        });
+    }
+
     if (cachedOrganizationMeta) return cachedOrganizationMeta;
 
     const tracer = opts && opts.tracer;
@@ -1026,8 +1055,8 @@ async function recoverStaleCustomerOrderAfterPutNotFound(ctx, deps = null) {
  */
 async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopecks = null } = {}) {
     if (!MOYSKLAD_TOKEN) {
-        console.log('[MoySklad] Token not configured, skip send order');
-        return;
+        console.warn('[MoySklad] MOYSKLAD_TOKEN is not configured');
+        throw new Error('MOYSKLAD_TOKEN_NOT_CONFIGURED');
     }
 
     // если у тебя здесь оставлен debugGetCustomerOrderFull — можешь оставить/убрать
@@ -1278,12 +1307,20 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
 
     // --- 3) организация + контрагент ---
     const organizationMeta = fixMeta(await getOrganizationMeta({ tracer }));
+
+    const agentHrefCfg = String(MOYSKLAD_AGENT_HREF || '').trim();
     const agentMeta = fixMeta(
-        await getOrCreateCounterpartyMeta(order.fullName, order.phone, order.email, {
-            tracer,
-            orderId: order.id,
-            createPayment: !!createPayment
-        })
+        agentHrefCfg
+            ? {
+                  href: agentHrefCfg,
+                  type: inferMetaTypeByHref(agentHrefCfg) || 'counterparty',
+                  mediaType: 'application/json'
+              }
+            : await getOrCreateCounterpartyMeta(order.fullName, order.phone, order.email, {
+                  tracer,
+                  orderId: order.id,
+                  createPayment: !!createPayment
+              })
     );
 
     // --- 4) адрес / самовывоз ---
@@ -1573,6 +1610,26 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         ...(attributesPayload.length ? { attributes: attributesPayload } : {})
     };
 
+    const storeHrefCfg = String(MOYSKLAD_STORE_HREF || '').trim();
+    if (storeHrefCfg) {
+        const storeMeta = fixMeta({
+            href: storeHrefCfg,
+            type: inferMetaTypeByHref(storeHrefCfg) || 'store',
+            mediaType: 'application/json'
+        });
+        payload.store = { meta: metaOrNull(storeMeta, 'store') };
+    }
+
+    const projectHrefCfg = String(MOYSKLAD_PROJECT_HREF || '').trim();
+    if (projectHrefCfg) {
+        const projectMeta = fixMeta({
+            href: projectHrefCfg,
+            type: inferMetaTypeByHref(projectHrefCfg) || 'project',
+            mediaType: 'application/json'
+        });
+        payload.project = { meta: metaOrNull(projectMeta, 'project') };
+    }
+
     // <-- ВАЖНО: ставим "План дата отгрузки" (deliveryPlannedMoment) только если это доставка и всё валидно
     // План дата отгрузки:
 // - доставка: ставим дату+время начала интервала
@@ -1716,6 +1773,8 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         const effectiveMsId = upsertResult.msOrderId;
         console.log('[MoySklad] Order updated, ms_id =', effectiveMsId);
 
+        updateOrderMoyskladSyncLocal(order.id, 'moysklad_synced', null);
+
         if (createPayment) {
             const sumToPay = Number.isFinite(Number(paidSumKopecks)) ? Number(paidSumKopecks) : 0;
             if (sumToPay <= 0) return;
@@ -1753,6 +1812,8 @@ async function sendOrderToMoySklad(order, { createPayment = false, paidSumKopeck
         [newId, msName, order.id],
         err => err && console.error('Cannot save ms_id/ms_name for order', err)
     );
+
+    updateOrderMoyskladSyncLocal(order.id, 'moysklad_synced', null);
 
     if (upsertResult.outcome === 'created') {
         console.log('[MoySklad] Order created, ms_id =', newId);
