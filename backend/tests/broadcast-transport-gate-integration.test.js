@@ -93,7 +93,13 @@ function dbAll(sql, params = []) {
     });
 }
 
-async function waitForDeliveryIdle(svc, campaignId, timeoutMs = 20000) {
+/**
+ * Дождаться завершения delivery job после transport gate / summary.
+ * Нельзя полагаться только на «сначала увидели worker running, потом idle»:
+ * на быстрых CI runner job может полностью проскочить между poll (15–20 ms), и sawRunning останется false.
+ * Устойчивые маркеры: CAMPAIGN_DONE_INCOMPLETE (await в sendSummary) и lastRun с PAUSED_BY_TRANSPORT_GATE.
+ */
+async function waitForDeliveryIdle(svc, campaignId, timeoutMs = 45000) {
     const deadline = Date.now() + timeoutMs;
     let sawRunning = false;
     while (Date.now() < deadline) {
@@ -101,10 +107,35 @@ async function waitForDeliveryIdle(svc, campaignId, timeoutMs = 20000) {
         if (w.running && Number(w.campaignId) === Number(campaignId)) {
             sawRunning = true;
         }
-        if (sawRunning && !w.running) {
-            return;
+        if (!w.running) {
+            const doneIncomplete = await dbGet(
+                `SELECT 1 AS ok FROM broadcast_campaign_events WHERE campaign_id = ? AND event_code = ? LIMIT 1`,
+                [campaignId, BROADCAST_CAMPAIGN_EVENT_CODES.CAMPAIGN_DONE_INCOMPLETE]
+            );
+            if (doneIncomplete) {
+                return;
+            }
+            let last = null;
+            try {
+                last = await svc.getBroadcastLastRunDiagnostics();
+            } catch (_) {
+                last = null;
+            }
+            if (
+                last &&
+                Number(last.campaignId) === Number(campaignId) &&
+                last.jobRan &&
+                last.jobHadTransportGateHalt &&
+                last.outcomeInterpretation &&
+                last.outcomeInterpretation.primary === 'PAUSED_BY_TRANSPORT_GATE'
+            ) {
+                return;
+            }
+            if (sawRunning) {
+                return;
+            }
         }
-        await new Promise((r) => setTimeout(r, 15));
+        await new Promise((r) => setTimeout(r, 25));
     }
     throw new Error('timeout waiting for delivery job');
 }
