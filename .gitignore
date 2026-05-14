@@ -8,6 +8,9 @@ backend/data/promotion-uploads/
 .env
 .env.*
 !.env.example
+
+# Генерируется CI перед rsync (см. .github/workflows/deploy.yml); локально может отсутствовать.
+deploy/deploy-info.json
 backups/
 *.dump
 *.sql

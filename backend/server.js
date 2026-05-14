@@ -20,6 +20,7 @@ const {
     scanStaleMsOrderLinks
 } = require('./moysklad');
 const config = require('./config');
+const { buildDeployInfoResponse } = require('./deploy-info');
 const {
     createTelegramBotApiAxios,
     describeProxyUrlForLogs,
@@ -651,6 +652,7 @@ app.post('/api/admin/client-log', (req, res) => {
  * ВАЖНО: /api/health/ops должен быть зарегистрирован до express.static и до SPA fallback.
  * Иначе при любой ошибке порядка маршрутов или отсутствии хендлера GET /api/* попадает в app.get('*')
  * и клиент получает index.html Mini App вместо JSON (симптом на проде: curl /api/health/ops → HTML).
+ * То же для GET /api/deploy-info.
  */
 app.get('/api/health/ops', async (req, res) => {
     const C = config;
@@ -782,6 +784,27 @@ app.get('/api/health/ops', async (req, res) => {
     });
 });
 
+/** Диагностика деплоя (без секретов): commit на диске, cwd процесса, свежесть frontend/index.html и app.js. */
+app.get('/api/deploy-info', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    try {
+        const body = buildDeployInfoResponse({
+            repoRoot,
+            config,
+            processEnv: process.env,
+            storefrontBuildId: FRONTEND_BUILD_ID,
+            storefrontBuildSource: FRONTEND_BUILD_SOURCE
+        });
+        res.type('application/json; charset=utf-8');
+        res.json(body);
+    } catch (e) {
+        console.error('[DeployInfo] handler_failed', { message: e.message || String(e) });
+        res.status(500).json({ ok: false, error: 'DEPLOY_INFO_FAILED' });
+    }
+});
+
 /** Публичный PDF для sendDocument (Telegram скачивает по HTTPS). Путь URL = BASE_URL + TELEGRAM_CONSENT_PUBLIC_PATH. */
 const consentPublicPath = String(config.TELEGRAM_CONSENT_PUBLIC_PATH || '/public/cvetochny21-consent.pdf');
 app.get(consentPublicPath, (req, res) => {
@@ -809,6 +832,7 @@ function sendAdminIndexHtml(res, initDataRaw) {
         res.setHeader('X-Frame-Options', 'SAMEORIGIN');
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
         res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         res.setHeader('Vary', 'Accept-Encoding');
         const injLen = String(initDataRaw || '').length;
         console.log('[AdminUI] sendAdminIndexHtml', {
@@ -849,7 +873,7 @@ function logStartupWiring() {
     console.log('[Startup] Telegram Bot API HTTP path:', describeProxyUrlForLogs(C.TELEGRAM_PROXY_URL));
     console.log('[Startup] F21 operational wiring (effective flags + thread ids, без секретов):', JSON.stringify({ flags, threads }, null, 0));
     console.log(
-        '[Startup] routes: GET /api/health/ops, POST /admin-launch, GET /admin-embed до express.static; SPA fallback не отдаёт HTML для /api/*'
+        '[Startup] routes: GET /api/health/ops, GET /api/deploy-info, POST /admin-launch, GET /admin-embed до express.static; SPA fallback не отдаёт HTML для /api/*'
     );
     console.log('[Startup] F21 frontend build', JSON.stringify({ build: FRONTEND_BUILD_ID, source: FRONTEND_BUILD_SOURCE }));
     if (C.BROADCASTS_ENABLED && !(threads.broadcastTopicId > 0)) {
@@ -951,13 +975,17 @@ app.use((req, res, next) => {
 
 if (ADMIN_UI_ENABLED || ADMIN_MINIAPP_EMBED_ENABLED) {
     app.get(`/admin-assets/app.${FRONTEND_BUILD_ID}.js`, (req, res) => {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         res.type('application/javascript; charset=utf-8');
         console.log('[AdminAssets] served', { file: 'app.js', path: `app.${FRONTEND_BUILD_ID}.js`, build: FRONTEND_BUILD_ID });
         res.sendFile(path.join(adminPath, 'app.js'));
     });
     app.get(`/admin-assets/styles.${FRONTEND_BUILD_ID}.css`, (req, res) => {
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         res.type('text/css; charset=utf-8');
         console.log('[AdminAssets] served', { file: 'styles.css', path: `styles.${FRONTEND_BUILD_ID}.css`, build: FRONTEND_BUILD_ID });
         res.sendFile(path.join(adminPath, 'styles.css'));
@@ -971,6 +999,7 @@ if (ADMIN_UI_ENABLED || ADMIN_MINIAPP_EMBED_ENABLED) {
                 if (base === 'app.js' || base === 'styles.css') {
                     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
                     res.setHeader('Pragma', 'no-cache');
+                    res.setHeader('Expires', '0');
                 }
             }
         })
@@ -1007,6 +1036,7 @@ function sendStorefrontIndexHtml(req, res) {
         let html = injectHtmlBuildStamp(fs.readFileSync(fp, 'utf8'), 'storefront');
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
         res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         res.setHeader('Vary', '*');
         res.type('text/html; charset=utf-8');
         console.log('[StorefrontHTML] served', {
@@ -1023,16 +1053,32 @@ function sendStorefrontIndexHtml(req, res) {
 }
 
 app.get(`/app.${FRONTEND_BUILD_ID}.js`, (req, res) => {
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.type('application/javascript; charset=utf-8');
     console.log('[StorefrontAssets] served', { file: 'app.js', path: `app.${FRONTEND_BUILD_ID}.js`, build: FRONTEND_BUILD_ID });
     res.sendFile(path.join(frontendPath, 'app.js'));
 });
 app.get(`/styles.${FRONTEND_BUILD_ID}.css`, (req, res) => {
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.type('text/css; charset=utf-8');
     console.log('[StorefrontAssets] served', { file: 'styles.css', path: `styles.${FRONTEND_BUILD_ID}.css`, build: FRONTEND_BUILD_ID });
     res.sendFile(path.join(frontendPath, 'styles.css'));
+});
+
+app.get('/deploy-info.json', (req, res) => {
+    const fp = path.join(frontendPath, 'deploy-info.json');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.type('application/json; charset=utf-8');
+    if (!fs.existsSync(fp)) {
+        return res.status(404).json({ ok: false, error: 'DEPLOY_INFO_MISSING' });
+    }
+    return res.sendFile(fp);
 });
 
 app.get(['/', '/index.html'], sendStorefrontIndexHtml);
@@ -1043,10 +1089,18 @@ app.use(
             const base = path.basename(String(filePath || ''));
             if (base === 'index.html') {
                 res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+                res.setHeader('Pragma', 'no-cache');
+                res.setHeader('Expires', '0');
             }
             if (base === 'app.js' || base === 'styles.css') {
                 res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
                 res.setHeader('Pragma', 'no-cache');
+                res.setHeader('Expires', '0');
+            }
+            if (base === 'deploy-info.json') {
+                res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+                res.setHeader('Pragma', 'no-cache');
+                res.setHeader('Expires', '0');
             }
         }
     })

@@ -3026,8 +3026,20 @@ function initProfileTabs() {
 
 // === Инициализация событий ===
 
+function fetchDeployInfoForLogs() {
+    void fetch('/deploy-info.json', { cache: 'no-store' })
+        .then((r) => r.json().catch(() => null))
+        .then((info) => {
+            if (info && typeof info === 'object') {
+                console.debug('[DeployInfo]', info);
+            }
+        })
+        .catch(() => {});
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     console.log('[StorefrontClient] boot', { build: getF21StorefrontRuntimeBuild(), path: location.pathname });
+    fetchDeployInfoForLogs();
     setupKeyboardHideFixedBars();
     //setupInputFocusScrollFix();
     initCartNoteModal();

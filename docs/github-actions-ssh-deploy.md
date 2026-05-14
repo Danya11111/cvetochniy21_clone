@@ -6,6 +6,7 @@
 
 - Перенос SQLite и данных: [database-migration-ru-to-new-server.md](./database-migration-ru-to-new-server.md)
 - Смоук-тест после выката: [production-smoke-test-checklist.md](./production-smoke-test-checklist.md)
+- Диагностика деплоя и рассинхрон Telegram/UI: [deploy-diagnostics.md](./deploy-diagnostics.md)
 - Примеры systemd в репозитории: **`deploy/systemd/cvet21.service.example`** (рекомендуемый для production, см. `deploy/PRODUCTION-SOURCE-OF-TRUTH-ru.md`) и **`deploy/cvetochniy21.service.example`** (дополнительный пример с именем unit под GitHub Actions). Оба файла остаются в репозитории.
 
 ## A. Что делает CI/CD
@@ -14,6 +15,7 @@
    - `actions/checkout`, `actions/setup-node` (Node 20, кэш npm).  
    - Зависимости: `npm ci`, если в корне есть `package-lock.json`, иначе `npm install`.  
    - `npm test` (в этом проекте в `npm test` уже входит `npm run verify:manifest`, отдельный шаг не дублируется).  
+   - После успешных тестов: шаг **Generate deploy info** перезаписывает `deploy/deploy-info.json` и `frontend/deploy-info.json` (`GITHUB_SHA`, `GITHUB_RUN_ID`, UTC `deployedAt`) перед `rsync` — см. [deploy-diagnostics.md](./deploy-diagnostics.md).  
    - Отдельных скриптов `lint`, `typecheck`, `build` в `package.json` нет — в workflow они не добавляются.
 
 2. **SSH**  
@@ -27,7 +29,11 @@
 4. **Деплой**  
    - `rsync -avz` по SSH **без `--delete`**, чтобы не сносить на сервере файлы, которых нет в репозитории (в т.ч. SQLite, uploads, локальный `.env`).
 
-5. **После копирования**  
+5. **Проверка удалённого дерева (blocking)**  
+   - После `rsync` workflow выполняет `scripts/gha-remote-verify-deploy.sh` на сервере: сверка `frontend/deploy-info.json` с `GITHUB_SHA`, отсутствие устаревших строк в `frontend/index.html` и `frontend/app.js`.  
+   - При несоответствии job завершится ошибкой **до** перезапуска процесса. Подробнее: [deploy-diagnostics.md](./deploy-diagnostics.md).
+
+6. **После копирования**  
    - В `$DEPLOY_PATH`: `npm ci --omit=dev` при наличии `package-lock.json`, иначе `npm install --omit=dev`.  
    - Перезапуск: `scripts/gha-remote-post-rsync.sh` вызывает **`systemctl restart`** или **`pm2 restart`** в таком порядке:
      1. `cvetochniy21.service`
@@ -37,9 +43,9 @@
      5. pm2 **`cvet21`**
      6. pm2 **`f21`**
 
-6. **Healthcheck (мягкий)**  
+7. **Healthcheck (мягкий)**  
    - Скрипт `scripts/gha-remote-healthcheck-soft.sh`: если есть `curl` и в `.env` найден `APP_PUBLIC_URL` или `BASE_URL`, выполняется запрос к `${URL}/api/health/ops`, затем при неуспехе к `${URL}/health`.  
-   - Реальный публичный JSON-эндпоинт в приложении: **`GET /api/health/ops`** (см. `backend/server.js`).  
+   - Реальный публичный JSON-эндпоинт в приложении: **`GET /api/health/ops`** (см. `backend/server.js`). Дополнительно для проверки выката: **`GET /api/deploy-info`**, **`GET /deploy-info.json`** (см. [deploy-diagnostics.md](./deploy-diagnostics.md)).  
    - Ошибка healthcheck **не валит** workflow — только сообщение в лог.
 
 Логика установки и перезапуска на сервере вынесена в:

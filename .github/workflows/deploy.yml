@@ -43,6 +43,35 @@ jobs:
         shell: bash
         run: npm test
 
+      - name: Generate deploy info
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const commit = process.env.GITHUB_SHA || 'unknown';
+          const shortCommit = commit.length >= 7 ? commit.slice(0, 7) : commit;
+          const deployedAt = new Date().toISOString();
+          const runId = process.env.GITHUB_RUN_ID != null ? String(process.env.GITHUB_RUN_ID) : null;
+          const workflow = process.env.GITHUB_WORKFLOW != null ? String(process.env.GITHUB_WORKFLOW) : null;
+          const payload = {
+            commit,
+            shortCommit,
+            deployedAt,
+            runId,
+            workflow,
+            source: 'github-actions'
+          };
+          fs.mkdirSync('deploy', { recursive: true });
+          fs.writeFileSync('deploy/deploy-info.json', JSON.stringify(payload, null, 2) + '\n');
+          const fe = { commit, shortCommit, deployedAt, runId, workflow };
+          fs.writeFileSync('frontend/deploy-info.json', JSON.stringify(fe, null, 2) + '\n');
+          NODE
+
       - name: Validate deploy secrets
         shell: bash
         run: |
@@ -127,6 +156,18 @@ jobs:
             --exclude 'logs/' \
             --exclude '*.log' \
             "./" "${DEST}"
+
+      - name: Verify remote deploy bundle (blocking)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export VERIFY_EXPECT_SHA="${GITHUB_SHA}"
+          DEPLOY_PATH_Q="$(printf '%q' "$DEPLOY_PATH")"
+          VERIFY_EXPECT_SHA_Q="$(printf '%q' "$VERIFY_EXPECT_SHA")"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "DEPLOY_PATH=${DEPLOY_PATH_Q} VERIFY_EXPECT_SHA=${VERIFY_EXPECT_SHA_Q} bash -se" \
+            < scripts/gha-remote-verify-deploy.sh
 
       - name: Install production dependencies and restart
         shell: bash
