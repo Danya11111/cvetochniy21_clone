@@ -65,6 +65,9 @@ function makeService(db, overrides = {}) {
         ABANDONED_CART_EXPIRE_DAYS: 30,
         TELEGRAM_FORUM_GROUP_ID: '-1001',
         TELEGRAM_TOPIC_ABANDONED_CARTS_ID: 9,
+        TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED: true,
+        ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED: true,
+        MINI_APP_URL: 'https://example.test',
         ...overrides
     };
     if (!Object.prototype.hasOwnProperty.call(overrides, 'ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED')) {
@@ -180,7 +183,8 @@ function makeService(db, overrides = {}) {
         await svcLimNotify.sync({
             cart_key: keyN,
             items: [{ name: 'Y', quantity: 1, price: 1 }],
-            total_kopecks: 100
+            total_kopecks: 100,
+            telegram_id: '1000999'
         });
         const rowN = await getRow(db5, `SELECT id FROM abandoned_carts WHERE cart_key = ?`, [keyN]);
         const n1 = await svcLimNotify.notifyNowAdmin(Number(rowN.id), '1');
@@ -249,6 +253,37 @@ function makeService(db, overrides = {}) {
         assert.strictEqual(Number(dashSnap.sumKopecksByStatus && dashSnap.sumKopecksByStatus.active || 0), 15000);
         assert.ok(Array.isArray(dashSnap.problemLastErrors));
         assert.ok(dashSnap.problemLastErrors.some((x) => String(x).includes('boom')));
+
+        /** notify-now: нет tg_user_id */
+        const dbNoTg = new sqlite3.Database(':memory:');
+        await createSchema(dbNoTg);
+        const svcNoTg = makeService(dbNoTg);
+        const kNo = 'f9011111-1111-4111-8111-111111111111';
+        await svcNoTg.sync({ cart_key: kNo, items: [{ name: 'N', quantity: 1, price: 10 }], total_kopecks: 1000 });
+        const rowNo = await getRow(dbNoTg, `SELECT id FROM abandoned_carts WHERE cart_key = ?`, [kNo]);
+        const nn = await svcNoTg.notifyNowAdmin(Number(rowNo.id), '1');
+        assert.strictEqual(nn.ok, false);
+        assert.strictEqual(String(nn.error || ''), 'NO_TG_USER_ID');
+        const rowsList = await svcNoTg.adminList({ limit: 5 });
+        assert.ok(rowsList.length >= 1);
+        assert.ok(String(rowsList[0].status_label || '').length > 0);
+
+        /** recovered → notify запрещён */
+        const dbRec = new sqlite3.Database(':memory:');
+        await createSchema(dbRec);
+        const svcRec = makeService(dbRec);
+        const kR = 'f9111111-1111-4111-8111-111111111111';
+        await svcRec.sync({
+            cart_key: kR,
+            items: [{ name: 'R', quantity: 1, price: 10 }],
+            total_kopecks: 1000,
+            telegram_id: '1'
+        });
+        await svcRec.markRecovered({ cart_key: kR, order_id: 77 });
+        const rowR = await getRow(dbRec, `SELECT id FROM abandoned_carts WHERE cart_key = ?`, [kR]);
+        const nr = await svcRec.notifyNowAdmin(Number(rowR.id), '1');
+        assert.strictEqual(nr.ok, false);
+        assert.strictEqual(String(nr.error || ''), 'BAD_STATUS');
 
         console.log('[abandoned-cart-service.test] PASS');
     } finally {

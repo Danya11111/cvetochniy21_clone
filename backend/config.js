@@ -168,6 +168,7 @@ if (0) {
     void process.env.TELEGRAM_TOPIC_BROADCASTS_ID;
     void process.env.TELEGRAM_TOPIC_ERRORS_ID;
     void process.env.TELEGRAM_TOPIC_ABANDONED_CARTS_ID;
+    void process.env.ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED;
     void process.env.TELEGRAM_BROADCAST_TOPIC_CHAT_ID;
     void process.env.TELEGRAM_BROADCAST_TOPIC_THREAD_ID;
     void process.env.TELEGRAM_ORDERS_NOTIFY_CHAT_ID;
@@ -196,6 +197,17 @@ function resolveAbandonedCartTelegramNotificationsEnabled(topicThreadId) {
     const raw = process.env.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED;
     if (raw === undefined || raw === null || String(raw).trim() === '') return tid > 0;
     return envBool('ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED', false);
+}
+
+/**
+ * Личные сообщения клиентам о брошенной корзине (Bot API sendMessage в личку).
+ * Если env не задан — по умолчанию повторяет TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED
+ * (без исходящего HTTP всё равно не отправим).
+ */
+function resolveAbandonedCartClientNotificationsEnabled(outboundHttpEnabled) {
+    const raw = process.env.ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED;
+    if (raw === undefined || raw === null || String(raw).trim() === '') return !!outboundHttpEnabled;
+    return envBool('ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED', true);
 }
 
 const RESOLVED_TELEGRAM_SUPPORT_TOPIC_THREAD_ID = resolveThreadFromEnv(
@@ -325,6 +337,13 @@ module.exports = {
      */
     ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED: resolveAbandonedCartTelegramNotificationsEnabled(
         RESOLVED_TELEGRAM_TOPIC_ABANDONED_CARTS_ID
+    ),
+    /**
+     * Личные уведомления клиенту (sendMessage). Не путать с forum-topic уведомлением в супергруппу.
+     * Дефолт согласован с TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED (см. resolveAbandonedCartClientNotificationsEnabled).
+     */
+    ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED: resolveAbandonedCartClientNotificationsEnabled(
+        envBool('TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED', false)
     ),
 
     ABANDONED_CARTS_ENABLED: envBool('ABANDONED_CARTS_ENABLED', false),

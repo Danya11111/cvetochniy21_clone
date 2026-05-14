@@ -989,22 +989,31 @@ function createAdminRouter({
             async (req, res) => {
                 try {
                     const out = await abandonedCartService.notifyNowAdmin(req.params.id, req.admin.telegramId);
-                    if (out.error === 'NOT_FOUND') return res.status(404).json({ ok: false, error: 'NOT_FOUND' });
-                    if (out.error === 'EMPTY_CART') return res.status(400).json({ ok: false, error: 'EMPTY_CART' });
-                    if (out.error === 'BAD_STATUS' || out.error === 'NOTIFY_LIMIT') {
-                        return res.status(400).json({ ok: false, error: out.error });
+                    if (out.error === 'NOT_FOUND') {
+                        return res.status(404).json({ ok: false, error: 'NOT_FOUND', error_message: out.error_message });
+                    }
+                    if (!out.ok) {
+                        const code = String(out.error || 'NOTIFY_FAILED');
+                        const msg = String(out.error_message || '').trim();
+                        const http =
+                            code === 'NOTIFY_LIMIT' || code === 'BAD_STATUS' || code === 'EMPTY_CART'
+                                ? 409
+                                : code === 'TELEGRAM_SEND_FAILED'
+                                  ? 502
+                                  : 400;
+                        return res.status(http).json({ ok: false, error: code, error_message: msg || undefined });
                     }
                     await adminRepository.logAction({
                         adminId: req.admin.adminId,
                         action: 'ABANDONED_CART_NOTIFY_NOW',
                         entityType: 'abandoned_cart',
                         entityId: String(req.params.id),
-                        details: { telegram_ok: !!out.ok }
+                        details: { telegram_ok: true }
                     });
-                    res.json({ ok: !!(out && out.ok), data: out });
+                    return res.json({ ok: true, data: { sent: true } });
                 } catch (e) {
                     console.error('[Admin] abandoned cart notify-now failed:', e.message || e);
-                    res.status(500).json({ ok: false, error: 'ABANDONED_CART_NOTIFY_FAILED' });
+                    return res.status(500).json({ ok: false, error: 'ABANDONED_CART_NOTIFY_FAILED' });
                 }
             }
         );

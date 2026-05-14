@@ -65,7 +65,7 @@ const DASH_METRIC_HELP = {
     },
     abandoned_carts: {
         title: 'Брошенные корзины',
-        body: 'Снимки корзин до заказа (total_amount хранится в копейках). На дашборде показана сумма по проблемным статусам (active/checkout_started/abandoned/notified). Детали — по раскрытию; телеграм-уведомления в тему включаются только если задана TELEGRAM_TOPIC_ABANDONED_CARTS_ID и включён режим отправки.'
+        body: 'Снимки корзин до заказа. total_amount — в копейках. Главное число на дашборде: сумма по статусам active/checkout_started/abandoned/notified. Напоминания клиенту — личные сообщения (без темы форума); отдельная тема «брошенные корзины» не нужна.'
     },
     top_products: {
         title: 'Топ популярных товаров',
@@ -174,7 +174,8 @@ const state = {
     ordersV2RangeLabel: '',
     /** @type {string} */
     adminsManageFlash: '',
-    abandonedCartFilter: 'all'
+    abandonedCartFilter: 'all',
+    abandonedNotice: null
 };
 
 function loadUiState() {
@@ -684,8 +685,19 @@ function decodeActionPayload(value) {
     }
 }
 
+function extractAdminErrorMessage(err) {
+    const raw = String((err && err.message) || '').trim();
+    if (raw) return raw;
+    const c = String((err && err.code) || '').trim();
+    return c || 'Не удалось выполнить действие. Попробуйте снова.';
+}
+
 function friendlyActionError(message) {
-    const text = String(message || '').toUpperCase();
+    const raw = String(message || '').trim();
+    if (/[а-яёА-ЯЁ]/.test(raw) && raw.length >= 3 && !/^HTTP_\d+$/i.test(raw)) {
+        return raw;
+    }
+    const text = raw.toUpperCase();
     /** До общего NOT_FOUND — иначе «PROMOTION_BROADCAST_NOT_FOUND» попадает под подстроку NOT_FOUND */
     if (text.includes('PROMOTION_BROADCAST_NOT_FOUND'))
         return 'Рассылка уже удалена или недоступна.';
@@ -901,7 +913,12 @@ async function api(path, options = {}) {
     const res = await fetch(path, { ...options, headers });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
-        let message = data.error ? String(data.error) : `HTTP_${res.status}`;
+        let message =
+            data.error_message != null && String(data.error_message).trim()
+                ? String(data.error_message).trim()
+                : data.error
+                  ? String(data.error)
+                  : `HTTP_${res.status}`;
         if (String(data.error) === 'DASHBOARD_V2_BAD_RANGE' && data.detail) {
             message = friendlyDashboardBadRange(data.detail);
         }
@@ -1386,6 +1403,9 @@ async function renderDashboardV2Screen() {
         const nNotified = Number(ac.notified || 0);
         const nRecovered = Number(ac.recovered || 0);
         const nProblemCarts = Number(ac.problemCartsCount || 0);
+        const nActiveFlow = nActiveOnly + nCheckout;
+        const subtitle = `Активных: ${formatNum(nActiveFlow)} · Брошенных: ${formatNum(nAbandoned)}`;
+        const isEmptySnapshot = nProblemCarts <= 0 && (!Number.isFinite(problemKProbe) || problemKProbe <= 0);
         const conv = dashboardFormatPct(ac.recoveryVsAbandonPct || 0);
         const sko = abandonedSk || {};
         const sumAct = formatRubWholeFromKopecks(Number(sko.active || 0));
@@ -1418,7 +1438,9 @@ async function renderDashboardV2Screen() {
                     </button>
                     <button type="button" class="dashboard-v2__abandoned-help-btn" data-action="dash-tip" data-tip-id="abandoned_carts" aria-label="Справка: брошенные корзины">?</button>
                 </div>
+                <p class="dashboard-v2__abandoned-subtitle">${esc(subtitle)}</p>
                 <div class="dashboard-v2__abandoned-details${acExpanded ? '' : ' dashboard-v2__abandoned-details--collapsed'}">
+                    ${isEmptySnapshot && acExpanded ? `<div class="dashboard-v2__empty-soft dashboard-v2__empty-soft--tight">Пока нет брошенных корзин</div>` : ''}
                     <div class="dashboard-v2__abandoned-kv">
                         <div>Активные: <strong>${esc(formatNum(nActiveOnly))}</strong> · ${esc(sumAct)}</div>
                         <div>Оформление: <strong>${esc(formatNum(nCheckout))}</strong> · ${esc(sumCo)}</div>
@@ -1559,6 +1581,17 @@ function formatAbandonedCartItemsPreview(itemsJson, limit = 10) {
     }
 }
 
+function abandonedNotifyDisabledUiLabel(reason) {
+    const s = String(reason || '');
+    if (/Нет Telegram ID|telegram id клиента/i.test(s)) return 'Нет Telegram ID для уведомления';
+    if (/Личные уведомления отключены|уведомления отключены в настройках/i.test(s))
+        return 'Личные уведомления отключены в настройках';
+    if (/Отправка в Telegram отключена/i.test(s)) return 'Отправка в Telegram отключена';
+    if (/лимит напоминаний/i.test(s)) return 'Лимит напоминаний';
+    if (/пуста/i.test(s)) return 'Корзина пуста';
+    return 'Уведомление недоступно';
+}
+
 async function renderAbandonedCartsScreen() {
     const mod = adminConfig && adminConfig.modules && adminConfig.modules.abandoned_carts;
     if (!mod) {
@@ -1577,66 +1610,124 @@ async function renderAbandonedCartsScreen() {
         return errorState(e.message || 'Не удалось загрузить корзины');
     }
 
+    const notice = state.abandonedNotice;
+    state.abandonedNotice = null;
+    const noticeHtml =
+        notice && notice.text
+            ? `<div class="dashboard-v2__banner ${notice.tone === 'err' ? 'dashboard-v2__banner--warn' : 'dashboard-v2__banner--ok'}" role="status">${esc(
+                  String(notice.text)
+              )}</div>`
+            : '';
+
     function opt(value, label) {
         return `<option value="${esc(value)}" ${filt === value ? 'selected' : ''}>${esc(label)}</option>`;
     }
 
     const filters = `
-        <form id="abandonedCartsFilterForm" class="mini-clients-search" style="flex-wrap:wrap;gap:8px">
-            <label class="list-card-meta" style="display:flex;align-items:center;gap:8px">
-                Статус
-                <select name="status">
+        <form id="abandonedCartsFilterForm" class="abandoned-cart-toolbar">
+            <label class="abandoned-cart-field">
+                <span class="abandoned-cart-field__label">Статус</span>
+                <select name="status" class="admin-select">
                     ${opt('all', 'Все')}
-                    ${opt('active', 'active')}
-                    ${opt('checkout_started', 'checkout_started')}
-                    ${opt('abandoned', 'abandoned')}
-                    ${opt('notified', 'notified')}
-                    ${opt('recovered', 'recovered')}
-                    ${opt('cleared', 'cleared')}
-                    ${opt('expired', 'expired')}
+                    ${opt('active', 'Активная')}
+                    ${opt('checkout_started', 'Начал оформление')}
+                    ${opt('abandoned', 'Брошенная')}
+                    ${opt('notified', 'Уведомлён')}
+                    ${opt('recovered', 'Восстановлена')}
+                    ${opt('cleared', 'Очищена')}
+                    ${opt('expired', 'Истекла')}
                 </select>
             </label>
-            <button type="submit" class="secondary">Применить</button>
-            <button type="button" class="secondary" data-action="reload-screen">Обновить</button>
+            <button type="submit" class="admin-btn admin-btn--secondary">Применить</button>
+            <button type="button" class="admin-btn admin-btn--ghost" data-action="reload-screen">Обновить</button>
         </form>`;
 
     const list = rows.length
         ? rows
               .map((r) => {
                   const id = Number(r.id);
-                  const pv = esc(formatAbandonedCartItemsPreview(r.items_json, 12));
-                  const money = formatKopecksAsRub(r.total_amount || 0);
-                  const nf = Number(r.notification_count || 0);
-                  const oid = r.order_id != null && String(r.order_id).trim() !== '' ? `#${esc(String(r.order_id))}` : '—';
+                  const titleDate = r.created_at ? formatDateTime(r.created_at) : `№${id}`;
+                  const title = `Корзина · ${titleDate}`;
+                  const stRaw = String(r.status_label || r.status || '—');
+                  const money = formatKopecksAsRub(r.total_amount_kopecks != null ? r.total_amount_kopecks : r.total_amount || 0);
+                  const cnt = Number(r.items_count != null ? r.items_count : 0);
+                  const previewItems = Array.isArray(r.items_preview) ? r.items_preview : [];
+                  const lines = previewItems.length
+                      ? previewItems
+                            .slice(0, 8)
+                            .map((it) => {
+                                const nm = esc(String(it.name || 'Товар').slice(0, 120));
+                                const q = formatNum(it.quantity || 0);
+                                const sum =
+                                    it.line_total_kopecks != null
+                                        ? formatKopecksAsRub(it.line_total_kopecks)
+                                        : '';
+                                return `<li class="abandoned-item-line"><span class="abandoned-item-line__name">${nm}</span><span class="abandoned-item-line__qty">× ${q}</span>${sum ? `<span class="abandoned-item-line__sum">${esc(sum)}</span>` : ''}</li>`;
+                            })
+                            .join('')
+                      : '';
+
+                  const customerMain = esc(String(r.customer_display || 'Клиент пока не определён'));
+                  const tgLine =
+                      r.tg_user_id && String(r.tg_user_id).trim()
+                          ? `<p class="abandoned-cart__tg mono">Telegram ID: ${esc(String(r.tg_user_id))}</p>`
+                          : '';
+
                   const err =
                       r.last_error && String(r.last_error).trim()
-                          ? `<p class="list-card-meta" style="opacity:.85;">Ошибка: ${esc(String(r.last_error).slice(0, 360))}</p>`
+                          ? `<p class="abandoned-cart__error">${esc(String(r.last_error).slice(0, 360))}</p>`
                           : '';
+
+                  const canNotify = r.can_notify_client === true;
+                  const notifyReason =
+                      r.notify_disabled_reason && String(r.notify_disabled_reason).trim()
+                          ? String(r.notify_disabled_reason).trim()
+                          : '';
+
+                  const expireBtn = canExp
+                      ? `<button type="button" class="admin-btn admin-btn--ghost" data-action="abandoned-cart-expire" data-id="${esc(String(id))}">Пометить истёкшей</button>`
+                      : '';
+
+                  let notifyBtn = '';
+                  if (canNotify) {
+                      notifyBtn = `<button type="button" class="admin-btn admin-btn--secondary" data-action="abandoned-cart-notify" data-id="${esc(String(id))}">Уведомить клиента</button>`;
+                  } else if (notifyReason) {
+                      const dl = abandonedNotifyDisabledUiLabel(notifyReason);
+                      notifyBtn = `<button type="button" class="admin-btn admin-btn--ghost" disabled title="${esc(notifyReason)}">${esc(dl)}</button>`;
+                  }
+
+                  const tech = `<details class="abandoned-cart-tech"><summary>Технические детали</summary><p class="mono abandoned-cart-tech__key">${esc(String(r.cart_key_short || ''))}</p></details>`;
+
                   return `
-            <article class="list-card">
-                <div class="list-card-footer">
-                    <h3 class="list-card-title">Корзина #${esc(id)}</h3>
-                    ${statusBadge(String(r.status || '—'), 'info')}
+            <article class="abandoned-cart-card">
+                <div class="abandoned-cart-card__head">
+                    <div>
+                        <h3 class="abandoned-cart-card__title">${esc(title)}</h3>
+                        <p class="abandoned-cart-card__sub">${esc(formatDateTime(r.last_seen_at))} · ${esc(formatNum(cnt))} шт.</p>
+                    </div>
+                    ${statusBadge(stRaw, 'info')}
                 </div>
-                <p class="mono list-card-meta" style="word-break:break-all;">cart_key: ${esc(String(r.cart_key || ''))}</p>
-                <p class="list-card-meta">Последняя активность: ${esc(formatOrderListDate(r.last_seen_at))} · Уведомлений: ${esc(String(nf))} · Заказ: ${oid}</p>
-                <p class="list-card-meta">${esc([r.customer_name, r.customer_phone].filter(Boolean).join(' · '))}</p>
-                <p class="list-card-meta"><strong>${esc(money)}</strong> · ${pv}</p>
+                <div class="abandoned-cart-card__money">${esc(money)}</div>
+                <p class="abandoned-cart__customer">${customerMain}</p>
+                ${tgLine}
+                ${lines ? `<ul class="abandoned-items">${lines}</ul>` : ''}
                 ${err}
-                <div class="list-card-footer" style="flex-wrap:wrap;gap:8px">
-                    <button type="button" class="secondary" data-action="abandoned-cart-expire" data-id="${esc(String(id))}">Пометить expired</button>
-                    <button type="button" class="secondary" data-action="abandoned-cart-notify" data-id="${esc(String(id))}">Уведомить сейчас</button>
+                ${tech}
+                <div class="abandoned-cart-actions">
+                    ${expireBtn}
+                    ${notifyBtn}
                 </div>
             </article>`;
               })
               .join('')
-        : '<p class="list-card-meta">Нет записей для выбранного фильтра.</p>';
+        : `<div class="dashboard-v2__empty-soft">Пока нет брошенных корзин</div>`;
 
     return `
-    <div class="dashboard-v2 screen-enter">
-        ${sectionHeader('Брошенные корзины', 'Снимок до оформления; суммы не используются для оплаты')}
+    <div class="dashboard-v2 screen-enter abandoned-carts-screen">
+        ${noticeHtml}
+        ${sectionHeader('Брошенные корзины', 'Снимок до заказа; суммы в интерфейсе — из серверного снимка (копейки).')}
         ${filters}
-        <div class="mini-clients-stack">${list}</div>
+        <div class="abandoned-cart-list">${list}</div>
     </div>`;
 }
 
@@ -3862,7 +3953,7 @@ async function handleAction(action, value, eventTarget) {
         if (!id) return;
         openConfirmationSheet(
             {
-                title: 'Пометить корзину как expired?',
+                title: 'Пометить корзину как истёкшей?',
                 message: `Корзина #${id} будет помечена как устаревшая.`,
                 severity: 'normal',
                 confirm_label: 'Пометить',
@@ -3870,7 +3961,12 @@ async function handleAction(action, value, eventTarget) {
             },
             async () => {
                 await runGuardedAction(`abandoned-expire-${id}`, async () => {
-                    await api(`/api/admin/abandoned-carts/${id}/mark-expired`, { method: 'POST' });
+                    try {
+                        await api(`/api/admin/abandoned-carts/${id}/mark-expired`, { method: 'POST' });
+                        state.abandonedNotice = { tone: 'ok', text: 'Корзина помечена как истёкшая' };
+                    } catch (e) {
+                        state.abandonedNotice = { tone: 'err', text: extractAdminErrorMessage(e) };
+                    }
                 });
             }
         );
@@ -3882,15 +3978,20 @@ async function handleAction(action, value, eventTarget) {
         if (!id) return;
         openConfirmationSheet(
             {
-                title: 'Отправить уведомление в Telegram?',
-                message: `Попытка админ-push для корзины #${id}. Сработает только если включены Telegram‑уведомления и задан forum topic.`,
+                title: 'Отправить напоминание клиенту?',
+                message: `Отправим личное сообщение в Telegram (если у корзины есть Telegram ID и доставка включена).`,
                 severity: 'normal',
                 confirm_label: 'Отправить',
                 cancel_label: 'Закрыть'
             },
             async () => {
                 await runGuardedAction(`abandoned-notify-${id}`, async () => {
-                    await api(`/api/admin/abandoned-carts/${id}/notify-now`, { method: 'POST' });
+                    try {
+                        await api(`/api/admin/abandoned-carts/${id}/notify-now`, { method: 'POST' });
+                        state.abandonedNotice = { tone: 'ok', text: 'Уведомление отправлено клиенту' };
+                    } catch (e) {
+                        state.abandonedNotice = { tone: 'err', text: extractAdminErrorMessage(e) };
+                    }
                 });
             }
         );

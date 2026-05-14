@@ -4,6 +4,70 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 const MAX_JSON_CHARS = 96 * 1024;
 const MAX_ITEMS = 80;
 const FINAL_STATUSES = new Set(['recovered', 'cleared', 'expired']);
+/** Статусы операционной воронки: можно напоминание клиенту / пометить истёкшей (если нет других блокеров). */
+const ACTIONABLE_STATUSES = new Set(['active', 'checkout_started', 'abandoned', 'notified']);
+
+const STATUS_LABEL_RU = {
+    active: 'Активная',
+    checkout_started: 'Начал оформление',
+    abandoned: 'Брошенная',
+    notified: 'Уведомлён',
+    recovered: 'Восстановлена',
+    cleared: 'Очищена',
+    expired: 'Истекла'
+};
+
+function statusLabelRu(code) {
+    const k = String(code || '').trim();
+    return STATUS_LABEL_RU[k] || k || '—';
+}
+
+function shortCartKey(cartKey) {
+    const s = String(cartKey || '').trim();
+    if (s.length <= 18) return s;
+    return `${s.slice(0, 4)}…${s.slice(-6)}`;
+}
+
+function resolvePublicMiniAppOpenUrl(config) {
+    const u = String(config.MINI_APP_URL || config.APP_PUBLIC_URL || config.BASE_URL || '').trim().replace(/\/+$/, '');
+    return u || 'https://tgtsvetochnii21.ru';
+}
+
+/**
+ * @param {{ ok?: boolean, errorCode?: string, message?: string }} tg
+ * @returns {{ userMessage: string, lastError: string }}
+ */
+function humanizeClientTelegramFailure(tg) {
+    if (tg && tg.ok) return { userMessage: '', lastError: '' };
+    const code = String(tg && tg.errorCode ? tg.errorCode : '');
+    const raw = String(tg && tg.message ? tg.message : '');
+    if (code === 'OUTBOUND_DISABLED') {
+        return {
+            userMessage: 'Личные уведомления отключены в настройках',
+            lastError: 'Личные уведомления отключены в настройках'
+        };
+    }
+    if (code === 'BOT_BLOCKED' || /blocked by the user/i.test(raw)) {
+        return { userMessage: 'Клиент заблокировал бота', lastError: 'Клиент заблокировал бота' };
+    }
+    if (code === 'USER_DEACTIVATED' || /user is deactivated/i.test(raw)) {
+        return { userMessage: 'Клиент заблокировал бота', lastError: 'Аккаунт Telegram недоступен' };
+    }
+    if (code === 'CHAT_NOT_FOUND' || /chat not found/i.test(raw)) {
+        return { userMessage: 'Не удалось доставить сообщение клиенту', lastError: 'Чат не найден (Telegram)' };
+    }
+    if (code === 'RATE_LIMIT' || code === 'TIMEOUT' || code === 'NETWORK') {
+        return { userMessage: 'Telegram временно недоступен', lastError: `Telegram временно недоступен: ${raw.slice(0, 240)}` };
+    }
+    if (code === 'NO_TOKEN' || code === 'NO_HTTP_CLIENT') {
+        return { userMessage: 'Telegram временно недоступен', lastError: raw.slice(0, 400) || 'Telegram: конфигурация' };
+    }
+    const short = raw.slice(0, 400);
+    return {
+        userMessage: 'Telegram временно недоступен',
+        lastError: short || 'Telegram: отправка не удалась'
+    };
+}
 
 /** @typedef {import('sqlite3').Database} SqliteDb */
 
@@ -110,9 +174,9 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
     const maxNotifications = Math.max(0, Number(config.ABANDONED_CART_MAX_NOTIFICATIONS) || 2);
     const expireDays = Math.max(1, Number(config.ABANDONED_CART_EXPIRE_DAYS) || 30);
 
-    const forumChatId = String(config.TELEGRAM_FORUM_GROUP_ID || '').trim();
-    const abandonedThreadId = Number(config.TELEGRAM_TOPIC_ABANDONED_CARTS_ID || 0);
-    const telegramNotifyEnabled = !!config.ABANDONED_CART_TELEGRAM_NOTIFICATIONS_ENABLED;
+    const clientNotificationsEnabled = !!config.ABANDONED_CART_CLIENT_NOTIFICATIONS_ENABLED;
+    const outboundEnabled = !!config.TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED;
+    const miniAppOpenUrl = resolvePublicMiniAppOpenUrl(config);
 
     function parseIsoMs(iso) {
         const t = Date.parse(String(iso || ''));
@@ -372,38 +436,126 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
         return `${rub.toLocaleString('ru-RU')} ₽`;
     }
 
-    /** Plain text only (avoid Markdown parse failures in forum topics). */
-    async function sendTelegramNotify(row) {
-        if (!telegramNotifyEnabled) {
-            return { ok: true, skipped: true, reason: 'TELEGRAM_DISABLED' };
+    /**
+     * Личное сообщение клиенту о брошенной корзине (кнопка Web App).
+     * @returns {Promise<{ok:boolean, skipped?:boolean, errorCode?:string, message?:string, data?:any}>}
+     */
+    async function sendClientAbandonedCartReminder(row) {
+        const chatId = String(row.tg_user_id || '').trim();
+        if (!chatId) {
+            return { ok: false, skipped: true, reason: 'NO_TG_USER_ID' };
         }
-        if (!forumChatId || !(abandonedThreadId > 0)) {
-            return { ok: true, skipped: true, reason: 'NO_TOPIC' };
+        if (!outboundEnabled) {
+            return { ok: false, errorCode: 'OUTBOUND_DISABLED', message: 'Telegram outbound HTTP disabled' };
         }
+        if (!clientNotificationsEnabled) {
+            return { ok: false, skipped: true, reason: 'CLIENT_NOTIFICATIONS_DISABLED' };
+        }
+        const amountRub = formatRubFromK(row.total_amount);
         const text =
-            `🛒 Брошенная корзина #${row.id}\n` +
-            `Ключ (cart_key): ${String(row.cart_key)}\n` +
-            `Статус: ${String(row.status)}\n` +
-            `Последняя активность: ${String(row.last_seen_at || '-')}\n` +
-            `${row.tg_user_id ? `TG: ${row.tg_user_id}\n` : ''}` +
-            `${row.customer_name ? `Имя: ${String(row.customer_name)}\n` : ''}` +
-            `${row.customer_phone ? `Телефон: ${String(row.customer_phone)}\n` : ''}` +
-            `${row.customer_address ? `Адрес: ${String(row.customer_address)}\n` : ''}` +
-            `Сумма (снимок): ${formatRubFromK(row.total_amount)}\n` +
-            `Состав:\n${formatCartLines(row.items_json)}\n\n` +
-            `Админка: раздел «Брошенные корзины».`;
-
+            `Вы оставили товары в корзине 🌸\n` +
+            `Сумма: ${amountRub}\n` +
+            `Можно вернуться к оформлению заказа в приложении.`;
+        const replyMarkup = {
+            inline_keyboard: [[{ text: 'Открыть корзину', web_app: { url: miniAppOpenUrl } }]]
+        };
         try {
-            const r = await telegramClient.sendMessage({
-                chatId: forumChatId,
-                messageThreadId: abandonedThreadId,
-                text
-            });
-            return r;
+            return await telegramClient.sendMessage({ chatId, text, replyMarkup });
         } catch (e) {
-            logger.error('[AbandonedCart] telegram_send_throw', { message: e.message || String(e) });
+            logger.error('[AbandonedCart] client_dm_throw', { message: e.message || String(e) });
             return { ok: false, errorCode: 'SEND_THROW', message: String(e.message || e).slice(0, 400) };
         }
+    }
+
+    function parseItemsPresentation(itemsJson) {
+        let items = [];
+        try {
+            items = JSON.parse(String(itemsJson || '[]'));
+        } catch (_) {
+            return [];
+        }
+        if (!Array.isArray(items)) return [];
+        const out = [];
+        for (const it of items.slice(0, 40)) {
+            if (!it || typeof it !== 'object') continue;
+            const name = String(it.name || 'Товар').trim().slice(0, 200) || 'Товар';
+            const qty = Math.max(0, Math.round(Number(it.quantity ?? it.qty ?? 1) || 0));
+            if (qty <= 0) continue;
+            const priceRub = Number(it.price ?? it.priceRub ?? 0);
+            const unitK = Number.isFinite(priceRub) ? Math.round(priceRub * 100) : 0;
+            const lineK = Math.max(0, Math.min(100_000_000, unitK * qty));
+            out.push({
+                name,
+                quantity: qty,
+                line_total_kopecks: lineK
+            });
+        }
+        return out;
+    }
+
+    function customerLabelFromRow(row) {
+        const name = row.customer_name ? String(row.customer_name).trim() : '';
+        const phone = row.customer_phone ? String(row.customer_phone).trim() : '';
+        if (name && phone) return `${name} · ${phone}`;
+        if (name) return name;
+        if (phone) return phone;
+        return '';
+    }
+
+    function presentAdminRow(row) {
+        const st = String(row.status || '');
+        const totalK = Math.round(Number(row.total_amount || 0));
+        const itemsPreview = parseItemsPresentation(row.items_json);
+        const itemsCount = itemsPreview.reduce((a, it) => a + (Number(it.quantity) || 0), 0);
+        const tgId = row.tg_user_id != null && String(row.tg_user_id).trim() !== '' ? String(row.tg_user_id).trim() : '';
+        const hasTg = !!tgId;
+        const nonempty = itemsNonEmpty(row.items_json);
+        const cnt = Number(row.notification_count || 0);
+
+        let canNotify = false;
+        let notifyDisabledReason = '';
+        if (!ACTIONABLE_STATUSES.has(st)) {
+            notifyDisabledReason = 'Для этого статуса уведомления не доступны';
+        } else if (!nonempty) {
+            notifyDisabledReason = 'Корзина пуста';
+        } else if (cnt >= maxNotifications) {
+            notifyDisabledReason = 'Достигнут лимит напоминаний';
+        } else if (!outboundEnabled) {
+            notifyDisabledReason = 'Отправка в Telegram отключена на сервере';
+        } else if (!clientNotificationsEnabled) {
+            notifyDisabledReason = 'Личные уведомления отключены в настройках';
+        } else if (!hasTg) {
+            notifyDisabledReason = 'Нет Telegram ID для уведомления';
+        } else {
+            canNotify = true;
+        }
+
+        let canMarkExpired = false;
+        if (!nonempty) {
+            /* noop */
+        } else if (st === 'recovered' || st === 'cleared' || st === 'expired') {
+            /* noop */
+        } else {
+            canMarkExpired = true;
+        }
+
+        return {
+            ...row,
+            /** @type {string} Сырой код статуса в БД */
+            status_code: st,
+            status_label: statusLabelRu(st),
+            /** `abandoned_carts.total_amount` — целые копейки (как и в заказах: младшие единицы денег). */
+            total_amount_kopecks: totalK,
+            cart_key_short: shortCartKey(row.cart_key),
+            customer_label: customerLabelFromRow(row) || '',
+            customer_display:
+                customerLabelFromRow(row) || (hasTg ? `Telegram ID: ${tgId}` : 'Клиент пока не определён'),
+            items_preview: itemsPreview,
+            items_count: itemsCount,
+            can_notify_client: canNotify,
+            notify_disabled_reason: canNotify ? '' : notifyDisabledReason,
+            can_mark_expired: canMarkExpired
+        };
     }
 
     async function markExpiredRow(id) {
@@ -507,7 +659,7 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
             [maxNotifications]
         );
 
-        if (telegramNotifyEnabled) {
+        if (clientNotificationsEnabled && outboundEnabled) {
             for (const row of notifyRows) {
                 const cnt = Number(row.notification_count || 0);
                 if (!(cnt < maxNotifications)) continue;
@@ -531,9 +683,24 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
 
                 if (!maySend) continue;
 
-                const tg = await sendTelegramNotify(row);
-                if (tg && tg.skipped) continue;
+                if (!String(row.tg_user_id || '').trim()) {
+                    continue;
+                }
+
+                const tg = await sendClientAbandonedCartReminder(row);
+                if (tg && (tg.skipped || tg.reason === 'CLIENT_NOTIFICATIONS_DISABLED')) continue;
+
                 const isoN = nowIso();
+                if (!tg || !tg.ok) {
+                    const h = humanizeClientTelegramFailure(tg || {});
+                    await run(db, `UPDATE abandoned_carts SET last_error = ?, updated_at = ? WHERE id = ?`, [
+                        h.lastError.slice(0, 900),
+                        isoN,
+                        row.id
+                    ]);
+                    continue;
+                }
+
                 const firstAt = cnt === 0 ? isoN : null;
                 const nextCount = cnt + 1;
                 const nextAt =
@@ -544,7 +711,7 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
                     lastAt: isoN,
                     nextAt,
                     status: 'notified',
-                    err: tg && tg.ok ? null : String(tg?.message || tg?.errorCode || 'SEND_FAILED').slice(0, 900),
+                    err: null,
                     meta: safeMetaParse(row.metadata_json)
                 });
                 notifiedN++;
@@ -560,18 +727,75 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
     async function notifyNowAdmin(id, actorTgId) {
         void actorTgId;
         const row = await get(db, `SELECT * FROM abandoned_carts WHERE id = ?`, [Number(id)]);
-        if (!row) return { ok: false, error: 'NOT_FOUND' };
-        if (!itemsNonEmpty(row.items_json)) return { ok: false, error: 'EMPTY_CART' };
+        if (!row) return { ok: false, error: 'NOT_FOUND', error_message: 'Корзина не найдена' };
+        if (!itemsNonEmpty(row.items_json)) {
+            return { ok: false, error: 'EMPTY_CART', error_message: 'В корзине нет товаров' };
+        }
         const st = String(row.status || '');
-        if (st === 'recovered' || st === 'cleared' || st === 'expired') return { ok: false, error: 'BAD_STATUS' };
-        if (Number(row.notification_count || 0) >= maxNotifications) return { ok: false, error: 'NOTIFY_LIMIT' };
-
-        if (!telegramNotifyEnabled) {
-            return { ok: false, error: 'TELEGRAM_NOTIFICATIONS_DISABLED' };
+        if (st === 'recovered' || st === 'cleared' || st === 'expired') {
+            return { ok: false, error: 'BAD_STATUS', error_message: 'Для этого статуса уведомление недоступно' };
+        }
+        if (Number(row.notification_count || 0) >= maxNotifications) {
+            return {
+                ok: false,
+                error: 'NOTIFY_LIMIT',
+                error_message: 'Достигнут лимит напоминаний для этой корзины'
+            };
+        }
+        if (!outboundEnabled) {
+            return {
+                ok: false,
+                error: 'OUTBOUND_DISABLED',
+                error_message: 'Отправка в Telegram отключена на сервере'
+            };
+        }
+        if (!clientNotificationsEnabled) {
+            return {
+                ok: false,
+                error: 'CLIENT_NOTIFICATIONS_DISABLED',
+                error_message: 'Личные уведомления отключены в настройках'
+            };
+        }
+        if (!String(row.tg_user_id || '').trim()) {
+            return {
+                ok: false,
+                error: 'NO_TG_USER_ID',
+                error_message: 'У этой корзины нет Telegram ID клиента'
+            };
         }
 
-        const tg = await sendTelegramNotify(row);
-        if (tg && tg.skipped) return { ok: false, error: 'TELEGRAM_NOTIFICATIONS_SKIP' };
+        const tg = await sendClientAbandonedCartReminder(row);
+        if (tg && tg.skipped && tg.reason === 'CLIENT_NOTIFICATIONS_DISABLED') {
+            return {
+                ok: false,
+                error: 'CLIENT_NOTIFICATIONS_DISABLED',
+                error_message: 'Личные уведомления отключены в настройках'
+            };
+        }
+        if (tg && tg.skipped) {
+            return {
+                ok: false,
+                error: 'NO_TG_USER_ID',
+                error_message: 'У этой корзины нет Telegram ID клиента'
+            };
+        }
+
+        if (!tg || !tg.ok) {
+            const h = humanizeClientTelegramFailure(tg || {});
+            const isoE = nowIso();
+            await run(db, `UPDATE abandoned_carts SET last_error = ?, updated_at = ? WHERE id = ?`, [
+                h.lastError.slice(0, 900),
+                isoE,
+                row.id
+            ]);
+            return {
+                ok: false,
+                error: 'TELEGRAM_SEND_FAILED',
+                error_message: h.userMessage,
+                telegram: tg
+            };
+        }
+
         const isoN = nowIso();
         const cnt = Number(row.notification_count || 0) + 1;
         await bumpNotificationRow(row.id, {
@@ -581,10 +805,10 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
             nextAt:
                 cnt < maxNotifications ? new Date(Date.now() + repeatHours * 60 * 60 * 1000).toISOString() : null,
             status: 'notified',
-            err: tg && tg.ok ? null : String(tg?.message || tg?.errorCode || 'SEND_FAILED').slice(0, 900),
+            err: null,
             meta: safeMetaParse(row.metadata_json)
         });
-        return { ok: !!(tg && tg.ok), telegram: tg };
+        return { ok: true, telegram: tg };
     }
 
     async function adminList({ status = '', limit = 100 } = {}) {
@@ -604,11 +828,13 @@ function createAbandonedCartService({ db, config, telegramClient, logger = conso
         }
         sql += ` ORDER BY last_seen_at DESC LIMIT ?`;
         params.push(lim);
-        return all(db, sql, params);
+        const rows = await all(db, sql, params);
+        return (rows || []).map((r) => presentAdminRow(r));
     }
 
     async function adminGetOne(id) {
-        return get(db, `SELECT * FROM abandoned_carts WHERE id = ?`, [Number(id)]);
+        const row = await get(db, `SELECT * FROM abandoned_carts WHERE id = ?`, [Number(id)]);
+        return row ? presentAdminRow(row) : null;
     }
 
     async function adminMarkExpired(id) {
