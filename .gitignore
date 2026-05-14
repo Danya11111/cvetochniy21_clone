@@ -3,6 +3,7 @@ backend/node_modules/
 backend/database.sqlite
 .idea
 .idea/
+.vscode/
 backend/data/promotion-uploads/
 .env
 .env.*
