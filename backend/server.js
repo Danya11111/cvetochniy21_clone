@@ -1784,17 +1784,17 @@ app.post('/api/checkout', async (req, res) => {
                             telegram_id, full_name, phone, address,
                             total, status, items_json, created_at,
                             delivery_date, delivery_time,
-                            total_before_bonus, bonuses_used, total_paid,
-                            bonus_earned, bonus_processed,
-                            checkout_hash, ms_sync_hash,
+                        total_before_bonus, bonuses_used, total_paid,
+                        bonus_earned, bonus_processed,
+                        checkout_hash, ms_sync_hash,
 
-                            receiver_mode, recipient_full_name, recipient_phone,
-                            florist_comment, card_text,
+                        receiver_mode, recipient_full_name, recipient_phone,
+                        florist_comment, card_text,
 
-                            -- NEW
-                            email, delivery_option, delivery_fee_rub,
+                        -- NEW
+                        email, delivery_option, delivery_fee_rub,
 
-                            source_code
+                        source_code
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     `,
@@ -1813,7 +1813,7 @@ app.post('/api/checkout', async (req, res) => {
 
                         totalBeforeK,
                         redeemK,
-                        totalPaidK,
+                        0,
 
                         0,
                         0,
@@ -1901,7 +1901,7 @@ app.post('/api/checkout', async (req, res) => {
                         totalPaidK / 100,
                         totalBeforeK,
                         redeemK,
-                        totalPaidK,
+                        0,
 
                         checkoutHash,
                         nowIso,

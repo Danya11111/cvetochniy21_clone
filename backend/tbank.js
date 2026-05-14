@@ -318,8 +318,8 @@ async function handleNotification(
 
         await new Promise((resolve, reject) => {
             db.run(
-                'UPDATE orders SET status = ? WHERE id = ?',
-                ['PAID', localOrderId],
+                'UPDATE orders SET status = ?, total_paid = ? WHERE id = ?',
+                ['PAID', Math.max(0, Math.round(Number(paymentRow.amount || 0))), localOrderId],
                 err => (err ? reject(err) : resolve())
             );
         });

@@ -1,7 +1,10 @@
 /**
  * Единая модель статусов заказа (платёжный контур приложения vs внешние подписи).
  *
- * Источник истины по оплате: orders.total_paid (копейки) + статусы PENDING_PAYMENT / AUTHORIZED / PAID из checkout и T-Bank.
+ * Источник истины по оплате:
+ * - Платёжный этап: orders.status (PENDING_PAYMENT / AUTHORIZED / PAID / PAYMENT_FAILED).
+ * - Фактически полученные деньги: orders.total_paid (копейки) выставляется только после webhook T-Bank Status=CONFIRMED
+ *   (до этого при оформлении — 0; «сумма к оплате» живёт в total_before_bonus/bonuses_used и orders.total в рублях).
  * Состояние заказа в МойСклад — только orders.ms_state_name (не перезаписывает платёжный status).
  */
 
@@ -16,10 +19,37 @@ function hasRecordedPayment(row) {
     return Math.round(Number(row && row.total_paid)) > 0;
 }
 
+/** SQL: строка заказа (alias) в финальной «оплаченной» семье статусов приложения (без учёта total_paid). */
+function sqlPaidOrderStatusFamily(alias = 'o') {
+    const a = String(alias || 'o').trim() || 'o';
+    return `UPPER(TRIM(COALESCE(${a}.status,''))) IN ('PAID','COMPLETED','DELIVERED')`;
+}
+
 /** Статус в БД считается «оплачен/завершён» для бизнес-логики (без учёта total_paid). */
 function isPaidStatusString(status) {
     const u = String(status || '').trim().toUpperCase();
     return PAID_CONFIRMED.has(u);
+}
+
+function isPaidOrderStatus(status) {
+    return isPaidStatusString(status);
+}
+
+function isPendingPaymentStatus(status) {
+    const u = String(status || '').trim().toUpperCase();
+    return PAYMENT_AWAIT.has(u);
+}
+
+/**
+ * Выручка / KPI: только финально оплаченные по статусу; сумма — через total_paid или legacy total в рублях.
+ * Не использует «total_paid > 0» в одиночку — иначе ломается разделение «сумма к оплате» vs «оплачено».
+ */
+function isRevenueOrderStatus(row) {
+    if (!isPaidStatusString(row && row.status)) return false;
+    const k = Math.round(Number(row && row.total_paid));
+    if (k > 0) return true;
+    const rub = Number(row && row.total);
+    return Number.isFinite(rub) && Math.round(rub * 100) > 0;
 }
 
 /** Неактивируемый «архивный» статус строки заказа: не смешиваем с PAYMENT_FAILED и не добавляем сценариев отмены/возврата в продукт. */
@@ -33,9 +63,12 @@ function isLegacyInactiveRawStatus(raw) {
     return false;
 }
 
-/** Оплачен по деньгам или по явному статусу (для админки, KPI, рисков). */
+/**
+ * Оплачен для операционки/админки: только явный финальный статус (PAID/COMPLETED/DELIVERED).
+ * total_paid > 0 без PAID — не считаем оплатой (исторический баг checkout заполнял total_paid до webhook).
+ */
 function isOrderPaidForOps(row) {
-    return hasRecordedPayment(row) || isPaidStatusString(row && row.status);
+    return isPaidStatusString(row && row.status);
 }
 
 function deriveOrderAdminPresentation(row) {
@@ -52,7 +85,7 @@ function deriveOrderAdminPresentation(row) {
         };
     }
     if (PAYMENT_AWAIT.has(u)) {
-        return { status_code: 'awaiting_payment', status_label: 'Ждёт оплаты', status_tone: 'warn', status_raw: raw };
+        return { status_code: 'awaiting_payment', status_label: 'Ожидает оплаты', status_tone: 'warn', status_raw: raw };
     }
     if (PAYMENT_AUTHORIZED.has(u)) {
         return { status_code: 'authorized', status_label: 'Оплата авторизована', status_tone: 'info', status_raw: raw };
@@ -84,7 +117,12 @@ function deriveOrderAdminPresentation(row) {
     };
 }
 
-const PAID_SQL = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+function normalizeOrderStatusForAdmin(row) {
+    return deriveOrderAdminPresentation(row);
+}
+
+/** Фильтр «оплаченных» заказов в SQL: только статус, не total_paid (см. MONEY_MODEL / payment flow). */
+const PAID_SQL = `(${sqlPaidOrderStatusFamily('o')})`;
 const PAYMENT_FAILED_SQL = `UPPER(TRIM(COALESCE(o.status,''))) = 'PAYMENT_FAILED'`;
 /**
  * История / «спящие» технические коды без отдельного продукта «отмена».
@@ -157,9 +195,14 @@ function buildOrdersListWhereClause({ status_code: statusCode = '', status: lega
 module.exports = {
     hasRecordedPayment,
     isPaidStatusString,
+    sqlPaidOrderStatusFamily,
+    isPaidOrderStatus,
+    isPendingPaymentStatus,
+    isRevenueOrderStatus,
     isLegacyInactiveRawStatus,
     isOrderPaidForOps,
     deriveOrderAdminPresentation,
+    normalizeOrderStatusForAdmin,
     buildOrdersListWhereClause,
     PAID_CONFIRMED,
     PAYMENT_AWAIT,

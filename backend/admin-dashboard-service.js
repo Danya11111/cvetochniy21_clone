@@ -11,10 +11,11 @@ const {
     kopecksToWholeRub,
     sqlOrderPaidRevenueKopecks
 } = require('./money');
+const { sqlPaidOrderStatusFamily } = require('./order-status');
 const { fetchAbandonedCartDashboardSnapshot } = require('./abandoned-cart-service');
 
-/** Должно совпадать с order-status.js (алиас o). */
-const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+/** Должно совпадать с order-status.js (алиас o): только финальный статус, не total_paid до webhook. */
+const PAID_SQL_O = `(${sqlPaidOrderStatusFamily('o')})`;
 
 const DASHBOARD_SYSTEM_NONE_CODE = '__none__';
 /** Пользовательский заголовок для bucket без трекинга (не ошибка данных). */

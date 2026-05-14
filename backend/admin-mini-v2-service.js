@@ -13,9 +13,10 @@ const {
     sqlUserFirstSeenJulianDay,
     sqlOrderCreatedJulianDay
 } = require('./admin-dashboard-service');
-const { orderPaidRevenueKopecksFromRow, kopecksToWholeRub, sqlOrderPaidRevenueKopecks } = require('./money');
+const { kopecksToWholeRub, sqlOrderPaidRevenueKopecks, orderAmountKopecksFromRow } = require('./money');
+const { sqlPaidOrderStatusFamily, isOrderPaidForOps } = require('./order-status');
 
-const PAID_SQL_OX = `(COALESCE(ox.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(ox.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+const PAID_SQL_OX = `(${sqlPaidOrderStatusFamily('ox')})`;
 
 function dbAll(sql, params = []) {
     return new Promise((resolve, reject) => {
@@ -72,17 +73,18 @@ async function listOrdersV2ForRange(range) {
         [range.periodStartIso, range.periodEndIso]
     );
     return rows.map((o) => {
-        const k = orderPaidRevenueKopecksFromRow(o);
+        const amountK = orderAmountKopecksFromRow(o);
+        const isPaid = isOrderPaidForOps(o);
         return {
             id: Number(o.id),
             created_at: o.created_at,
             telegram_id: String(o.telegram_id || ''),
             client_name: String(o.full_name || '').trim() || null,
             status: String(o.status || ''),
-            is_paid: k > 0,
-            payment_label: k > 0 ? 'Оплачен' : 'Не оплачен',
-            amount_kopecks: k,
-            amount_rub: kopecksToWholeRub(k),
+            is_paid: isPaid,
+            payment_label: isPaid ? 'Оплачен' : 'Не оплачен',
+            amount_kopecks: amountK,
+            amount_rub: kopecksToWholeRub(amountK),
             items_count: orderItemsCount(o.items_json),
             source_code: o.source_code ? String(o.source_code) : null
         };
@@ -278,7 +280,7 @@ async function getClientV2Detail(telegramId) {
     if (!id) return null;
 
     const u = await dbGet(`SELECT * FROM users WHERE telegram_id = ? LIMIT 1`, [id]);
-    const paidCond = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+    const paidCond = `(${sqlPaidOrderStatusFamily('o')})`;
     const agg = await dbGet(
         `
         SELECT

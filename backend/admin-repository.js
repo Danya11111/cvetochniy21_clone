@@ -2948,7 +2948,7 @@ function createAdminRepository() {
                        COUNT(*) AS total_orders,
                        MAX(o.created_at) AS last_order_at,
                        MAX(CASE
-                               WHEN COALESCE(o.total_paid, 0) > 0 OR UPPER(COALESCE(o.status, '')) IN ('PAID', 'COMPLETED', 'DELIVERED')
+                               WHEN UPPER(TRIM(COALESCE(o.status, ''))) IN ('PAID', 'COMPLETED', 'DELIVERED')
                                THEN o.created_at
                                ELSE NULL
                            END) AS last_paid_order_at,
@@ -3086,7 +3086,7 @@ function createAdminRepository() {
                        COUNT(*) AS total_orders,
                        MAX(o.created_at) AS last_order_at,
                        MAX(CASE
-                               WHEN COALESCE(o.total_paid, 0) > 0 OR UPPER(COALESCE(o.status, '')) IN ('PAID', 'COMPLETED', 'DELIVERED')
+                               WHEN UPPER(TRIM(COALESCE(o.status, ''))) IN ('PAID', 'COMPLETED', 'DELIVERED')
                                THEN o.created_at
                                ELSE NULL
                            END) AS last_paid_order_at,

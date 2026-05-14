@@ -16,17 +16,18 @@ function test(name, fn) {
     }
 }
 
-test('paid by total_paid', () => {
-    assert.strictEqual(isOrderPaidForOps({ total_paid: 100, status: 'Создан' }), true);
+test('pending with prefilled total_paid is not paid', () => {
+    assert.strictEqual(isOrderPaidForOps({ total_paid: 30000, status: 'PENDING_PAYMENT' }), false);
 });
 
-test('paid by status', () => {
+test('paid by status only', () => {
     assert.strictEqual(isOrderPaidForOps({ total_paid: 0, status: 'PAID' }), true);
 });
 
 test('label awaiting payment', () => {
     const u = deriveOrderAdminPresentation({ status: 'PENDING_PAYMENT', total_paid: 0 });
     assert.strictEqual(u.status_code, 'awaiting_payment');
+    assert.ok(String(u.status_label).includes('Ожидает'));
 });
 
 test('legacy cyrillic status unpaid', () => {
@@ -70,7 +71,8 @@ test('list filter legacy_inactive aligns with refunded', () => {
 
 test('list filter paid by status_code', () => {
     const { clause } = buildOrdersListWhereClause({ status_code: 'paid', status: '' });
-    assert.ok(clause.includes('total_paid'));
+    assert.ok(clause.includes('PAID'));
+    assert.ok(!clause.includes('total_paid'));
     assert.ok(clause.toUpperCase().includes('WHERE'));
 });
 

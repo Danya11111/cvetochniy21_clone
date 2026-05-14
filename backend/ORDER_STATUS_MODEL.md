@@ -4,7 +4,7 @@
 
 | Сущность | Канон | Примечание |
 |----------|--------|------------|
-| Оплата (локально) | `orders.total_paid` (копейки), `payments.amount` | T-Bank Init / webhook |
+| Оплата (локально) | `orders.total_paid` (копейки после `CONFIRMED`), `payments.amount` | Init создаёт платёж; webhook подтверждает |
 | Платёжный этап заказа | `orders.status` для значений из приложения | `PENDING_PAYMENT`, `AUTHORIZED`, `PAID`, `PAYMENT_FAILED`; исторические коды см. `LEGACY_INACTIVE_SQL` в `backend/order-status.js` |
 | Стадия в МойСклад | `orders.ms_state_name` | Только текст из MS (`state.name`), **не** перезаписывает `orders.status` |
 | Поддержка | `support_threads.status`, `first_response_at` | `OPEN` / `PENDING` + отсутствие первого ответа → «ждёт ответа» в агрегатах главной |
@@ -13,8 +13,8 @@
 
 Вычисляется в `backend/order-status.js` → `deriveOrderAdminPresentation(row)`:
 
-1. Если есть оплата (`total_paid > 0`) или статус `PAID` / `COMPLETED` / `DELIVERED` → бейдж **«Оплачен»**.
-2. Иначе `PENDING_PAYMENT` → **«Ждёт оплаты»**.
+1. Если статус `PAID` / `COMPLETED` / `DELIVERED` → бейдж **«Оплачен»** (`total_paid` заполняется webhook-ом, но UI опирается на статус).
+2. Иначе `PENDING_PAYMENT` → **«Ожидает оплаты»**.
 3. Иначе `AUTHORIZED` → **«Оплата авторизована»**.
 4. Иначе `PAYMENT_FAILED` → **«Оплата не прошла»** (это не «архивная отмена» и не сценарий возврата в продукте).
 5. Иначе технические коды из прошлых версий или отрезки вроде `REFUND*` / `CANCELLED` → **«Архивный статус»** без действий в UI.

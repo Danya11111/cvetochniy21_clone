@@ -4,8 +4,9 @@ const assert = require('assert');
 const sqlite3 = require('sqlite3').verbose();
 const { sqlOrderPaidRevenueKopecks } = require('../money');
 const { mergeDashboardSourcesForApi, DASHBOARD_SYSTEM_NONE_CODE } = require('../admin-dashboard-service');
+const { sqlPaidOrderStatusFamily } = require('../order-status');
 
-const PAID_SQL_O = `(COALESCE(o.total_paid,0) > 0 OR UPPER(TRIM(COALESCE(o.status,''))) IN ('PAID','COMPLETED','DELIVERED'))`;
+const PAID_SQL_O = `(${sqlPaidOrderStatusFamily('o')})`;
 
 function openMemDb() {
     return new Promise((resolve, reject) => {
@@ -64,6 +65,11 @@ function dbAll(db, sql, params = []) {
     await dbRun(db, `INSERT INTO orders (telegram_id, created_at, source_code, status, total_paid) VALUES ('2', ?, '', 'PENDING_PAYMENT', 0)`, [t0]);
     await dbRun(db, `INSERT INTO orders (telegram_id, created_at, source_code, status, total_paid) VALUES ('3', ?, 'tg_bot', 'PENDING_PAYMENT', 0)`, [t0]);
     await dbRun(db, `INSERT INTO orders (telegram_id, created_at, source_code, status, total_paid) VALUES ('4', ?, 'tg_bot', 'PAID', 10000)`, [t0]);
+    await dbRun(
+        db,
+        `INSERT INTO orders (telegram_id, created_at, source_code, status, total_paid, total) VALUES ('6', ?, 'tg_bot', 'PENDING_PAYMENT', 50000, 300)`,
+        [t0]
+    );
     await dbRun(db, `INSERT INTO orders (telegram_id, created_at, source_code, status, total_paid) VALUES ('5', ?, NULL, 'PENDING_PAYMENT', 0)`, [t1]);
 
     const revExpr = sqlOrderPaidRevenueKopecks('o');
@@ -115,8 +121,15 @@ function dbAll(db, sql, params = []) {
     assert.strictEqual(noneRow.title, 'Не определено');
     assert.strictEqual(noneRow.clicks, 0);
     assert.ok(
-        merged.some((x) => x.code === 'tg_bot' && x.clicks === 2 && x.ordersCount === 2),
-        'источник с переходами и заказами'
+        merged.some(
+            (x) =>
+                x.code === 'tg_bot' &&
+                x.clicks === 2 &&
+                x.ordersCount === 3 &&
+                x.paidOrdersCount === 1 &&
+                x.revenueKopecks === 10000
+        ),
+        'источник с переходами и заказами; PENDING с prefilled total_paid не считается оплатой'
     );
 
     const noneOnlyMerge = mergeDashboardSourcesForApi([], [], [{ code: none, clients_count: 2 }], []);

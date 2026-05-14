@@ -4,9 +4,10 @@ const { isPaidStatusString } = require('./order-status');
  * Денежная модель проекта (единый источник правил).
  *
  * Каноническое хранение в БД / платежах:
- * - orders.total_paid, orders.total_before_bonus, orders.bonuses_used, orders.bonus_earned — INTEGER, копейки
- * - orders.total — REAL, рубли (зеркало к оплате для витрины/уведомлений; задаётся как total_paid/100 при checkout)
- * - payments.amount — INTEGER, копейки (T-Bank Init)
+ * - orders.total_paid — INTEGER, копейки: фактически полученная оплата (после T-Bank CONFIRMED); до оплаты = 0.
+ * - orders.total_before_bonus, orders.bonuses_used, orders.bonus_earned — INTEGER, копейки
+ * - orders.total — REAL, рубли (витрина / подсказки; при оформлении = сумма к оплате после бонусов)
+ * - payments.amount — INTEGER, копейки (инициализируется Init, обновляется webhook)
  * - users.bonus_balance — INTEGER, целые рубли (1 бонус = 1 ₽)
  *
  * Админ API: денежные метрики в JSON — целые копейки (см. backend/MONEY_MODEL.md).
@@ -20,32 +21,41 @@ function toFiniteNumber(v, fallback = 0) {
     return Number.isFinite(n) ? n : fallback;
 }
 
-/** Сумма строки заказа «сколько клиент заплатил / должен заплатить» в копейках. */
+/** Сумма строки заказа «к оплате / номинал заказа» в копейках (не путать с total_paid до webhook). */
 function orderAmountKopecksFromRow(row) {
+    const beforeRaw = row && row.total_before_bonus;
+    const bonusRaw = row && row.bonuses_used;
+    const beforeFinite = beforeRaw != null && beforeRaw !== '' && Number.isFinite(Number(beforeRaw));
+    const bonusFinite = bonusRaw != null && bonusRaw !== '' && Number.isFinite(Number(bonusRaw));
+    if (beforeFinite || bonusFinite) {
+        const before = beforeFinite ? Math.round(Number(beforeRaw)) : 0;
+        const bonus = bonusFinite ? Math.round(Number(bonusRaw)) : 0;
+        const k = Math.max(0, before - bonus);
+        if (k > 0) return k;
+    }
+    const totalRub = toFiniteNumber(row && row.total);
+    const fromTotal = Math.round(totalRub * KOPEKS_PER_RUB);
+    if (fromTotal > 0) return fromTotal;
     const paidK = Math.round(toFiniteNumber(row && row.total_paid));
     if (paidK > 0) return paidK;
-    const totalRub = toFiniteNumber(row && row.total);
-    return Math.round(totalRub * KOPEKS_PER_RUB);
+    return 0;
 }
 
 /**
- * Выручка по заказу для агрегатов (только оплаченные / подтверждённые суммы), копейки.
- * Неоплаченные дают 0.
+ * Выручка по заказу для агрегатов (только финально оплаченные статусы).
+ * total_paid > 0 без PAID не даёт выручку (защита от исторического бага checkout).
  */
 function orderPaidRevenueKopecksFromRow(row) {
+    if (!isPaidStatusString(row && row.status)) return 0;
     const paidK = Math.round(toFiniteNumber(row && row.total_paid));
     if (paidK > 0) return paidK;
-    if (isPaidStatusString(row && row.status)) {
-        return Math.round(toFiniteNumber(row && row.total) * KOPEKS_PER_RUB);
-    }
-    return 0;
+    return Math.round(toFiniteNumber(row && row.total) * KOPEKS_PER_RUB);
 }
 
 /** Сумма «под риском» для неоплаченного заказа (ожидаемая оплата), копейки. */
 function orderUnpaidExposureKopecksFromRow(row) {
-    const paidK = Math.round(toFiniteNumber(row && row.total_paid));
-    if (paidK > 0) return 0;
-    return Math.round(toFiniteNumber(row && row.total) * KOPEKS_PER_RUB);
+    if (isPaidStatusString(row && row.status)) return 0;
+    return orderAmountKopecksFromRow(row);
 }
 
 function rubThresholdToKopecks(rub) {
@@ -69,9 +79,11 @@ function formatKopecksRu(minor) {
 function sqlOrderPaidRevenueKopecks(alias) {
     const a = String(alias || 'o').trim() || 'o';
     return `CASE
-        WHEN COALESCE(${a}.total_paid, 0) > 0 THEN ${a}.total_paid
-        WHEN UPPER(TRIM(COALESCE(${a}.status, ''))) IN ('PAID', 'COMPLETED', 'DELIVERED')
-            THEN CAST(ROUND(COALESCE(${a}.total, 0) * ${KOPEKS_PER_RUB}) AS INTEGER)
+        WHEN UPPER(TRIM(COALESCE(${a}.status, ''))) IN ('PAID', 'COMPLETED', 'DELIVERED') THEN
+            CASE
+                WHEN COALESCE(${a}.total_paid, 0) > 0 THEN ${a}.total_paid
+                ELSE CAST(ROUND(COALESCE(${a}.total, 0) * ${KOPEKS_PER_RUB}) AS INTEGER)
+            END
         ELSE 0
     END`;
 }
