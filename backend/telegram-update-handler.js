@@ -436,7 +436,9 @@ function createTelegramUpdateHandler({
                 fromId: fromIdDbg
             });
             try {
-                const relayResult = await supportService.handleClientMessage(message);
+                const relayResult = await supportService.handleClientMessage(message, {
+                    updateId: updateMeta.updateId != null ? Number(updateMeta.updateId) : null
+                });
                 if (!relayResult || relayResult.ok === false) {
                     logger.warn('[SupportFlow] handle_client_message_error', {
                         error: relayResult?.error || 'RELAY_REJECTED',
@@ -476,7 +478,8 @@ function createTelegramUpdateHandler({
                 }
                 await handleMessage(message, {
                     hasMessage: !!update?.message,
-                    hasEditedMessage: !!update?.edited_message
+                    hasEditedMessage: !!update?.edited_message,
+                    updateId: update?.update_id != null ? Number(update.update_id) : null
                 });
                 return { ok: true };
             }

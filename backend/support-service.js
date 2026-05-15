@@ -4,6 +4,13 @@ const {
     isMessageInSupportNotifyTopic
 } = require('./support-topic-reply-log');
 const managerHelpOps = require('./manager-help-ops');
+const { resolveSupportClientNotificationCooldownMs, shouldNotifySupportAboutClientMessage } = require('./support-client-notification-policy');
+const {
+    buildSupportRelayManagerHintLines,
+    buildSupportRelayPayload,
+    redactTelegramChatIdForLog,
+    supportMessageKindFromUpdateMessage
+} = require('./support-relay-utils');
 
 function run(sql, params = []) {
     return new Promise((resolve, reject) => {
@@ -22,7 +29,16 @@ function get(sql, params = []) {
 
 /** Окно для метрики «скорость ответа» и антидубль уведомлений в тему поддержки. */
 const SUPPORT_RESPONSE_WINDOW_MS = 2 * 60 * 60 * 1000;
-const SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+
+function needsSupportManagerHint(updateMessage, payload) {
+    const m = updateMessage || {};
+    const kind = String(payload?.content_kind || supportMessageKindFromUpdateMessage(m));
+    const replyId = Number(m.reply_to_message?.message_id || 0);
+    const fwd =
+        !!(m.forward_origin || m.forward_from || m.forward_from_chat || (m.forward_date != null && m.forward_date !== 0));
+    const mediaKinds = new Set(['photo', 'video', 'document', 'voice', 'audio', 'sticker', 'animation', 'video_note']);
+    return mediaKinds.has(kind) || (replyId > 0 ? true : false) || fwd === true;
+}
 
 function createSupportService({
     telegramClient,
@@ -31,6 +47,7 @@ function createSupportService({
     supportNotifyThreadId,
     logger = console,
     managerHelpCooldownMs = 7 * 60 * 1000,
+    supportClientNotifyCooldownMs = resolveSupportClientNotificationCooldownMs(),
     telegramOutboundBotHttpEnabled = true
 }) {
     /**
@@ -148,9 +165,14 @@ function createSupportService({
         );
     }
 
-    async function handleClientMessage(updateMessage) {
+    /**
+     * Пересылка клиент → тема поддержки всегда копирует ТЕКУЩЕЕ входящее сообщение из приватного чата:
+     * message.message_id (не reply_to_message.message_id, не copied_message_id из истории, не «последний id» темы).
+     */
+    async function handleClientMessage(updateMessage, relayCtx = {}) {
         const from = updateMessage?.from || {};
         const telegramUserId = String(from.id || '');
+        const updateId = relayCtx?.updateId != null ? Number(relayCtx.updateId) : null;
         if (!telegramUserId) return { ok: false, error: 'NO_USER_ID' };
 
         const topic = await routingService.ensureClientTopic({
@@ -162,6 +184,19 @@ function createSupportService({
         if (!topic) return { ok: false, error: 'TOPIC_NOT_AVAILABLE' };
 
         const thread = await getOrCreateThread({ telegramUserId, topic });
+
+        const priorRelay = await get(
+            `
+            SELECT COUNT(1) AS c
+            FROM support_messages
+            WHERE thread_id = ?
+              AND direction = 'CLIENT_TO_TOPIC'
+              AND status = 'SENT'
+              AND copied_message_id IS NOT NULL
+            `,
+            [Number(thread.id)]
+        );
+        const priorSuccessfulRelayCount = Number(priorRelay?.c ?? 0) || 0;
 
         const duplicate = await get(
             `
@@ -179,20 +214,30 @@ function createSupportService({
             return { ok: true, duplicate: true };
         }
 
+        const privateChatId = updateMessage.chat?.id;
+        const outgoingMessageId = Number(updateMessage.message_id ?? 0);
+        if (privateChatId === undefined || privateChatId === null || !(outgoingMessageId > 0)) {
+            logger.warn('[SupportRelay] aborted', { code: 'NO_PRIVATE_CHAT_CONTEXT', updateId });
+            return { ok: false, error: 'NO_PRIVATE_CHAT_CONTEXT' };
+        }
+
+        /** Всегда copyMessage именно этого message_id текущего update (антисубституция media). */
         const copied = await telegramClient.copyMessage({
-            fromChatId: updateMessage.chat.id,
-            messageId: updateMessage.message_id,
+            fromChatId: privateChatId,
+            messageId: outgoingMessageId,
             chatId: topic.chat_id,
             messageThreadId: topic.message_thread_id
         });
 
+        const sanitizedPayload = buildSupportRelayPayload({ updateId: updateId || null, message: updateMessage });
+
         await logSupportMessage({
             threadId: thread.id,
             direction: 'CLIENT_TO_TOPIC',
-            sourceChatId: updateMessage.chat.id,
-            sourceMessageId: updateMessage.message_id,
+            sourceChatId: privateChatId,
+            sourceMessageId: outgoingMessageId,
             copiedMessageId: copied.ok ? copied.data?.message_id : null,
-            payload: updateMessage,
+            payload: sanitizedPayload,
             status: copied.ok ? 'SENT' : 'FAILED',
             errorMessage: copied.ok ? null : copied.message
         });
@@ -216,7 +261,45 @@ function createSupportService({
             await openSupportResponseWindowIfNeeded(thread.id, telegramUserId, new Date().toISOString());
         }
 
-        if (supportNotifyChatId && supportNotifyThreadId > 0) {
+        if (copied.ok && needsSupportManagerHint(updateMessage, sanitizedPayload)) {
+            try {
+                const hintText = buildSupportRelayManagerHintLines({
+                    payload: sanitizedPayload
+                }).join('\n');
+                await telegramClient.sendMessage({
+                    chatId: topic.chat_id,
+                    messageThreadId: topic.message_thread_id,
+                    text: String(hintText || '').slice(0, 4096)
+                });
+            } catch (e) {
+                logger.warn('[SupportRelay] manager_hint_failed', {
+                    threadId: Number(thread.id),
+                    message: String(e?.message || e).slice(0, 240)
+                });
+            }
+        }
+
+        const relayKindForLog = String(sanitizedPayload?.content_kind || 'unknown');
+        const photoUid = sanitizedPayload?.media?.photo_largest_file_unique_id || null;
+        if (copied.ok) {
+            logger.log('[SupportRelay] relay_copy_ok', {
+                scope: 'client_to_topic',
+                updateId: updateId ?? null,
+                threadId: Number(thread.id),
+                direction: 'CLIENT_TO_TOPIC',
+                sourceChatFingerprint: redactTelegramChatIdForLog(privateChatId),
+                source_message_id: outgoingMessageId,
+                copied_message_id: copied.data?.message_id || null,
+                content_kind: relayKindForLog,
+                photo_file_unique_id: relayKindForLog === 'photo' ? photoUid : null,
+                reply_to_private_message_id: updateMessage?.reply_to_message?.message_id != null
+                    ? Number(updateMessage.reply_to_message.message_id)
+                    : null,
+                forward_origin_type: sanitizedPayload?.forward_origin?.type || null
+            });
+        }
+
+        if (copied.ok && supportNotifyChatId && supportNotifyThreadId > 0) {
             const topicLink = routingService.buildTopicLink(topic.chat_id, topic.message_thread_id);
             const text =
                 `🆘 Поддержка: новый клиентский запрос\n` +
@@ -227,14 +310,24 @@ function createSupportService({
             const tRow = await get(`SELECT last_client_notification_at FROM support_threads WHERE id = ?`, [
                 Number(thread.id)
             ]);
-            const lastN = tRow && tRow.last_client_notification_at ? String(tRow.last_client_notification_at) : '';
-            let shouldNotify = !lastN;
-            if (lastN) {
-                const t = Date.parse(lastN);
-                shouldNotify = !Number.isFinite(t) || Date.now() - t >= SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS;
-            }
+            const decision = shouldNotifySupportAboutClientMessage(tRow || {}, {
+                isFirstRelayedClientMessage:
+                    copied.ok &&
+                    !(Number.isFinite(Number(priorSuccessfulRelayCount)) && Number(priorSuccessfulRelayCount) > 0)
+            }, {
+                cooldownMs: supportClientNotifyCooldownMs,
+                nowMs: Date.now()
+            });
 
-            if (shouldNotify) {
+            /* Сообщение доставлено в тему, но ping менеджеров отдельно — политика antispam. */
+            logger.log('[SupportNotifyTopic] client_message_decision', {
+                threadDbId: Number(thread.id),
+                priorSuccessfulRelayCount: Number(priorSuccessfulRelayCount || 0),
+                shouldAlertManagers: !!decision.shouldNotify,
+                reason: decision.reason
+            });
+
+            if (decision.shouldNotify) {
                 const sent = await telegramClient.sendMessage({
                     chatId: supportNotifyChatId,
                     messageThreadId: Number(supportNotifyThreadId),
@@ -256,15 +349,21 @@ function createSupportService({
                         Number(thread.id)
                     ]);
                 }
-            } else {
-                logger.log('[SupportNotifyTopic] support_notify_skipped_window', {
+            } else if (decision.reason === 'cooldown_active') {
+                logger.debug?.('[SupportNotifyTopic] notify_suppressed_quiet', {
                     threadDbId: Number(thread.id),
                     telegramUserId,
-                    last_client_notification_at: lastN || null,
-                    cooldownHours: SUPPORT_NOTIFY_TOPIC_COOLDOWN_MS / 3600000
+                    reason: decision.reason
                 });
+                if (!logger.debug) {
+                    logger.log('[SupportNotifyTopic] notify_suppressed', {
+                        threadDbId: Number(thread.id),
+                        reason: decision.reason,
+                        cooldownMinutes: Math.round(supportClientNotifyCooldownMs / 60000)
+                    });
+                }
             }
-        } else {
+        } else if (copied.ok) {
             logger.log('[SupportNotifyTopic] skip (no chat/thread)', {
                 hasChat: !!supportNotifyChatId,
                 threadId: Number(supportNotifyThreadId || 0)
@@ -343,27 +442,57 @@ function createSupportService({
             return { ok: true, duplicate: true };
         }
 
-        logger.log('[SupportTopicReply] relay to client attempted', {
+        const topicStaffChatId = updateMessage.chat?.id;
+        const topicOutgoingId = Number(updateMessage.message_id || 0);
+        logger.log('[SupportTopicReply] relay_to_client_attempted', {
             threadId: Number(thread.id),
-            sourceMessageId: Number(updateMessage.message_id || 0)
+            source_chat_fingerprint: redactTelegramChatIdForLog(topicStaffChatId),
+            topic_source_message_id: topicOutgoingId
         });
 
+        /**
+         * Менеджер → клиент: копируется текущее сообщение темы поддержки этого клиента (`message.message_id`).
+         * Не подставлять reply_to из цепочки как «новое сообщение»: при ответах quote остаётся превью внутри сообщения темы —
+         * бот переводит в личку ровно тот апдейт темы (с тем же текстом/media), который отправил оператор.
+         */
         const copied = await telegramClient.copyMessage({
-            fromChatId: updateMessage.chat.id,
-            messageId: updateMessage.message_id,
+            fromChatId: topicStaffChatId,
+            messageId: topicOutgoingId,
             chatId: topic.telegram_user_id
         });
+
+        const mgrSanitizedPayload = buildSupportRelayPayload({ updateId: null, message: updateMessage });
 
         await logSupportMessage({
             threadId: thread.id,
             direction: 'TOPIC_TO_CLIENT',
-            sourceChatId: updateMessage.chat.id,
-            sourceMessageId: updateMessage.message_id,
+            sourceChatId: topicStaffChatId,
+            sourceMessageId: topicOutgoingId,
             copiedMessageId: copied.ok ? copied.data?.message_id : null,
-            payload: updateMessage,
+            payload: mgrSanitizedPayload,
             status: copied.ok ? 'SENT' : 'FAILED',
             errorMessage: copied.ok ? null : copied.message
         });
+
+        if (copied.ok) {
+            const mk = String(mgrSanitizedPayload?.content_kind || 'unknown');
+            const phUid = mgrSanitizedPayload?.media?.photo_largest_file_unique_id || null;
+            logger.log('[SupportRelay] relay_copy_ok', {
+                scope: 'topic_to_client',
+                threadId: Number(thread.id),
+                direction: 'TOPIC_TO_CLIENT',
+                sourceChatFingerprint: redactTelegramChatIdForLog(topicStaffChatId),
+                source_message_id: topicOutgoingId,
+                copied_message_id: copied.data?.message_id || null,
+                client_telegram_user_id_digits: `${String(topic.telegram_user_id || '').slice(0, 4)}…`,
+                content_kind: mk,
+                photo_file_unique_id: mk === 'photo' ? phUid : null,
+                reply_to_topic_message_id: updateMessage?.reply_to_message?.message_id != null
+                    ? Number(updateMessage.reply_to_message.message_id)
+                    : null,
+                note: 'from_forum_topic: staff message id is copied as-is'
+            });
+        }
 
         if (copied.ok) {
             const now = new Date().toISOString();
@@ -456,6 +585,7 @@ function createSupportService({
         }
 
         try {
+            /* Антидубль быстрых повторных нажатий: отдельный in-memory cooldown успешного ping (не смешивать с CLIENT_MESSAGE alert). */
             if (managerHelpOps.isCooldownActive(telegramUserId, managerHelpCooldownMs)) {
                 managerHelpOps.bumpDuplicateSuppress();
                 logger.log('[ManagerHelp] duplicate_suppressed', { reason: 'cooldown', telegramUserId });
@@ -546,6 +676,14 @@ function createSupportService({
             managerHelpOps.markNotifyCooldown(telegramUserId);
             managerHelpOps.recordManagerHelpNotifySuccess();
             managerHelpOps.clearManagerHelpLastError();
+
+            /* Синхронизируем с политикой client-message notify: после ping обновляем last_client_notification_at. */
+            const stampNotify = new Date().toISOString();
+            await run(`UPDATE support_threads SET last_client_notification_at = ? WHERE id = ?`, [
+                stampNotify,
+                Number(thread.id)
+            ]);
+
             logger.log('[ManagerHelp] notify_topic_sent', {
                 telegramUserId,
                 threadId: Number(thread.id),

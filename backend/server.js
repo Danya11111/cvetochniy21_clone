@@ -75,6 +75,7 @@ const { createTelegramRoutingService } = require('./telegram-routing-service');
 const { createOutboxRepository } = require('./outbox-repository');
 const { createOutboxWorker } = require('./outbox-worker');
 const { createOrderTopicNotificationService } = require('./order-topic-notification-service');
+const { resolveSupportClientNotificationCooldownMs } = require('./support-client-notification-policy');
 const { createSupportService } = require('./support-service');
 const { createBroadcastService } = require('./broadcast-service');
 const telegramTransportHealth = require('./telegram-transport-health');
@@ -131,6 +132,7 @@ const supportService = createSupportService({
     supportNotifyThreadId: Number(TELEGRAM_SUPPORT_NOTIFY_THREAD_ID || 0),
     logger: console,
     managerHelpCooldownMs: config.MANAGER_HELP_COOLDOWN_MS,
+    supportClientNotifyCooldownMs: resolveSupportClientNotificationCooldownMs(),
     telegramOutboundBotHttpEnabled: config.TELEGRAM_OUTBOUND_BOT_HTTP_ENABLED
 });
 const broadcastService = createBroadcastService({
